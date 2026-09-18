@@ -48,14 +48,20 @@ export class GPUThermalSimulator {
     user_sessions = 0,
     batch_jobs = 0
   ): number {
+    // Strictly clamp inputs to user-defined maximum limits
+    const safe_ai = Math.max(0, Math.min(100, ai_reqs));
+    const safe_api = Math.max(0, Math.min(500, api_reqs));
+    const safe_users = Math.max(0, Math.min(200, user_sessions));
+    const safe_batch = Math.max(0, Math.min(5, batch_jobs));
+
     const base_idle = 80.0;
-    const ai_power = ai_reqs * 3.0;
-    const api_power = api_reqs * 0.3;
-    const user_power = user_sessions * 0.5;
-    const batch_power = batch_jobs * 100.0;
+    const ai_power = safe_ai * 3.0; // 0 to 300W
+    const api_power = safe_api * 0.3; // 0 to 150W
+    const user_power = safe_users * 0.5; // 0 to 100W
+    const batch_power = safe_batch * 100.0; // 0 to 500W
     const total = base_idle + ai_power + api_power + user_power + batch_power;
-    const noise = this.gaussianRandom(0, Math.max(total * 0.02, 1.0));
-    return Math.max(80.0, total + noise);
+    const noise = this.gaussianRandom(0, Math.max(total * 0.015, 0.5));
+    return Math.max(80.0, Math.min(1135.0, total + noise));
   }
 
   // Exact Runge-Kutta 4th order (RK4) integration for 1 second step

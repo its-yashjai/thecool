@@ -15,9 +15,14 @@ import {
   ExternalLink,
   ChevronDown,
   ChevronUp,
-  Activity
+  Activity,
+  HelpCircle,
+  Terminal,
+  BookOpen,
+  Command
 } from 'lucide-react';
 import { useGlobalVoice } from '../context/VoiceContext';
+import { VoiceCommandsModal } from './VoiceCommandsModal';
 
 export const GlobalVoiceBar: React.FC = () => {
   const {
@@ -30,6 +35,11 @@ export const GlobalVoiceBar: React.FC = () => {
     interimTranscript,
     lastSpokenReply,
     lastVoiceDirective,
+    recognitionLanguage,
+    setRecognitionLanguage,
+    isCommandsModalOpen,
+    openCommandsModal,
+    closeCommandsModal,
     isLiveKitConnected,
     isMuted,
     micAudioLevel,
@@ -46,6 +56,7 @@ export const GlobalVoiceBar: React.FC = () => {
 
   const [inputVal, setInputVal] = useState('');
   const [isExpanded, setIsExpanded] = useState(true);
+  const [showTooltip, setShowTooltip] = useState(false);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -190,58 +201,148 @@ export const GlobalVoiceBar: React.FC = () => {
           </button>
         </div>
 
-        {/* Right Side: Quick Voice Chips & Direct Command Input */}
+        {/* Right Side: Quick Voice Chips, Commands Tooltip & Direct Command Input */}
         {isExpanded && (
           <div className="flex flex-wrap items-center gap-2 w-full md:w-auto justify-end">
             <div className="flex flex-wrap items-center gap-1.5">
+              {/* Dialect / Accent selector pill */}
+              <div className="hidden lg:flex items-center gap-1 bg-[#101030] border border-sky-500/30 rounded-lg px-2 py-1 text-[11px]">
+                <span className="text-zinc-400 text-[10px]">Accent:</span>
+                <select
+                  value={recognitionLanguage}
+                  onChange={(e) => setRecognitionLanguage(e.target.value)}
+                  className="bg-transparent text-sky-300 font-mono text-[10.5px] focus:outline-none cursor-pointer"
+                  title="Spoken dialect acoustic model"
+                >
+                  <option value="en-IN" className="bg-[#0e0e2e] text-white">English (India - en-IN)</option>
+                  <option value="en-US" className="bg-[#0e0e2e] text-white">English (US - en-US)</option>
+                  <option value="en-GB" className="bg-[#0e0e2e] text-white">English (UK - en-GB)</option>
+                  <option value="en-AU" className="bg-[#0e0e2e] text-white">English (AU - en-AU)</option>
+                  <option value="en-CA" className="bg-[#0e0e2e] text-white">English (CA - en-CA)</option>
+                </select>
+              </div>
+
+              {/* Commands & Shortcuts Trigger with Hover Tooltip Overlay */}
+              <div className="relative">
+                <button
+                  id="open-commands-modal-btn"
+                  onClick={openCommandsModal}
+                  onMouseEnter={() => setShowTooltip(true)}
+                  onMouseLeave={() => setShowTooltip(false)}
+                  className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-sky-500/20 via-purple-500/20 to-emerald-500/20 hover:from-sky-500/30 hover:to-emerald-500/30 border border-sky-400/40 text-sky-200 hover:text-white font-bold text-[11px] transition-all cursor-pointer flex items-center gap-1.5 shadow-[0_0_15px_rgba(56,189,248,0.15)] ring-1 ring-sky-400/30"
+                  title="Click to view all voice shortcuts & commands"
+                >
+                  <Command className="w-3.5 h-3.5 text-sky-400" />
+                  <span>⚡ Voice Shortcuts</span>
+                  <span className="px-1.5 py-0.2 rounded-full text-[9px] bg-sky-400/20 text-sky-300 font-mono">10+</span>
+                </button>
+
+                {/* Interactive Tooltip Overlay on hover */}
+                {showTooltip && (
+                  <div className="absolute right-0 top-full mt-2 w-72 p-3 rounded-xl bg-[#0e0e2e] border border-sky-400/40 shadow-2xl z-50 text-left pointer-events-none animate-fade-in backdrop-blur-md">
+                    <div className="flex items-center justify-between pb-1.5 border-b border-white/10 mb-2">
+                      <span className="text-[11px] font-bold text-sky-300 flex items-center gap-1">
+                        <Mic className="w-3 h-3 text-emerald-400" /> Voice Shortcut Cheat Sheet
+                      </span>
+                      <span className="text-[9px] font-mono text-zinc-400">Click button for all</span>
+                    </div>
+                    <div className="space-y-1.5 text-[10.5px]">
+                      <div className="flex items-center justify-between text-emerald-300 bg-emerald-950/40 px-1.5 py-1 rounded">
+                        <strong className="font-mono">"NeuralFlow listen"</strong>
+                        <span className="text-zinc-400 text-[9.5px]">Turns on mic</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sky-300 bg-sky-950/40 px-1.5 py-1 rounded">
+                        <strong className="font-mono">"Suggest"</strong>
+                        <span className="text-zinc-400 text-[9.5px]">Speaks recommendation</span>
+                      </div>
+                      <div className="flex items-center justify-between text-amber-300 bg-amber-950/40 px-1.5 py-1 rounded">
+                        <strong className="font-mono">"That's it"</strong>
+                        <span className="text-zinc-400 text-[9.5px]">Stops / standby</span>
+                      </div>
+                      <div className="flex items-center justify-between text-purple-300 bg-purple-950/40 px-1.5 py-1 rounded">
+                        <strong className="font-mono">"Start simulation"</strong>
+                        <span className="text-zinc-400 text-[9.5px]">Runs cluster</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Fast Direct Action Chips */}
+              <button
+                id="voice-chip-listen"
+                onClick={() => {
+                  connectLiveKit();
+                  dispatchVoice('NeuralFlow listen');
+                }}
+                disabled={isProcessing}
+                className="px-2 py-1 rounded-lg bg-[#141432] hover:bg-emerald-500/20 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 transition-colors cursor-pointer flex items-center gap-1"
+                title='Wake agent and activate listening mode'
+              >
+                <Mic className="w-3 h-3 text-emerald-400" />
+                <span>"Listen"</span>
+              </button>
+
+              <button
+                id="voice-chip-suggest"
+                onClick={() => dispatchVoice('Suggest NeuralFlow')}
+                disabled={isProcessing}
+                className="px-2 py-1 rounded-lg bg-[#141432] hover:bg-sky-500/20 border border-sky-500/30 text-[11px] font-semibold text-sky-200 transition-colors cursor-pointer flex items-center gap-1"
+                title='Ask NeuralFlow for live recommendation'
+              >
+                <Sparkles className="w-3 h-3 text-sky-400" />
+                <span>"Suggest"</span>
+              </button>
+
+              <button
+                id="voice-chip-thatsit"
+                onClick={() => dispatchVoice("That's it NeuralFlow")}
+                disabled={isProcessing}
+                className="px-2 py-1 rounded-lg bg-[#141432] hover:bg-amber-500/20 border border-amber-500/30 text-[11px] font-semibold text-amber-300 transition-colors cursor-pointer flex items-center gap-1"
+                title='Pause listening and put on standby'
+              >
+                <MicOff className="w-3 h-3 text-amber-400" />
+                <span>"That's it"</span>
+              </button>
+
               <button
                 id="voice-chip-start"
                 onClick={() => dispatchVoice('Start simulation')}
                 disabled={isProcessing}
-                className="px-2.5 py-1 rounded-lg bg-[#141432] hover:bg-emerald-500/20 border border-white/10 hover:border-emerald-500/40 text-[11px] font-semibold text-emerald-300 transition-colors cursor-pointer flex items-center gap-1"
+                className="px-2 py-1 rounded-lg bg-[#141432] hover:bg-emerald-500/20 border border-white/10 hover:border-emerald-500/40 text-[11px] font-semibold text-emerald-300 transition-colors cursor-pointer flex items-center gap-1"
               >
                 <Play className="w-3 h-3 text-emerald-400" />
-                <span>"Start simulation"</span>
+                <span>"Start"</span>
               </button>
 
               <button
                 id="voice-chip-increase"
                 onClick={() => dispatchVoice('Increase workload')}
                 disabled={isProcessing}
-                className="px-2.5 py-1 rounded-lg bg-[#141432] hover:bg-amber-500/20 border border-white/10 hover:border-amber-500/40 text-[11px] font-semibold text-amber-300 transition-colors cursor-pointer flex items-center gap-1"
+                className="px-2 py-1 rounded-lg bg-[#141432] hover:bg-amber-500/20 border border-white/10 hover:border-amber-500/40 text-[11px] font-semibold text-amber-300 transition-colors cursor-pointer flex items-center gap-1"
               >
                 <Zap className="w-3 h-3 text-amber-400" />
-                <span>"Increase workload"</span>
+                <span>"Boost"</span>
               </button>
 
               <button
                 id="voice-chip-preramp"
                 onClick={() => dispatchVoice('Pre-ramp cooling fans')}
                 disabled={isProcessing}
-                className="px-2.5 py-1 rounded-lg bg-[#141432] hover:bg-sky-500/20 border border-white/10 hover:border-sky-500/40 text-[11px] font-semibold text-sky-300 transition-colors cursor-pointer flex items-center gap-1"
+                className="px-2 py-1 rounded-lg bg-[#141432] hover:bg-sky-500/20 border border-white/10 hover:border-sky-500/40 text-[11px] font-semibold text-sky-300 transition-colors cursor-pointer flex items-center gap-1"
               >
                 <Volume2 className="w-3 h-3 text-sky-400" />
-                <span>"Pre-ramp fans"</span>
+                <span>"Pre-ramp"</span>
               </button>
 
               <button
                 id="voice-chip-reset"
                 onClick={() => dispatchVoice('Reset simulation')}
                 disabled={isProcessing}
-                className="px-2.5 py-1 rounded-lg bg-[#141432] hover:bg-purple-500/20 border border-white/10 hover:border-purple-500/40 text-[11px] font-semibold text-purple-300 transition-colors cursor-pointer flex items-center gap-1"
+                className="px-2 py-1 rounded-lg bg-[#141432] hover:bg-purple-500/20 border border-white/10 hover:border-purple-500/40 text-[11px] font-semibold text-purple-300 transition-colors cursor-pointer flex items-center gap-1"
               >
                 <RotateCcw className="w-3 h-3 text-purple-400" />
                 <span>"Reset"</span>
-              </button>
-
-              <button
-                id="voice-chip-suggest"
-                onClick={() => dispatchVoice('What should I do?')}
-                disabled={isProcessing}
-                className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-sky-400/20 to-emerald-400/20 border border-sky-400/30 text-[11px] font-semibold text-sky-200 hover:text-white transition-colors cursor-pointer flex items-center gap-1"
-              >
-                <Sparkles className="w-3 h-3 text-sky-400" />
-                <span>"What to do?"</span>
               </button>
 
               <button
@@ -316,6 +417,12 @@ export const GlobalVoiceBar: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Render Voice Commands Modal */}
+      <VoiceCommandsModal
+        isOpen={isCommandsModalOpen}
+        onClose={closeCommandsModal}
+      />
     </div>
   );
 };

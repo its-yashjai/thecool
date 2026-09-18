@@ -79,6 +79,7 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
     micErrorMessage,
     messages,
     interimTranscript,
+    openCommandsModal,
     isLiveKitConnected,
     isMuted,
     micAudioLevel,
@@ -291,14 +292,24 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
               </p>
             </div>
           </div>
-          <button
-            onClick={() => handleDispatch('What should I do?')}
-            disabled={isProcessing}
-            className="self-start sm:self-auto px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#1e90ff] to-[#2ed573] text-black font-bold text-xs flex items-center gap-1.5 hover:opacity-90 transition-opacity cursor-pointer shadow-md disabled:opacity-50"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>💡 Suggest What To Do</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              id="voice-operator-shortcuts-btn"
+              onClick={openCommandsModal}
+              className="self-start sm:self-auto px-3 py-1.5 rounded-xl bg-[#141432] hover:bg-sky-500/20 border border-sky-400/30 text-sky-200 hover:text-white font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
+              title="Open full Voice Shortcuts & Commands Modal"
+            >
+              <span>⚡ Voice Shortcuts (Cheat Sheet)</span>
+            </button>
+            <button
+              onClick={() => handleDispatch('What should I do?')}
+              disabled={isProcessing}
+              className="self-start sm:self-auto px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#1e90ff] to-[#2ed573] text-black font-bold text-xs flex items-center gap-1.5 hover:opacity-90 transition-opacity cursor-pointer shadow-md disabled:opacity-50"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>💡 Suggest What To Do</span>
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">

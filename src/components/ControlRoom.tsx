@@ -58,6 +58,16 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
   const [localUsers, setLocalUsers] = useState<number>(liveState?.users ?? 35);
   const [localBatch, setLocalBatch] = useState<number>(liveState?.batch ?? 0);
 
+  // Synchronize local slider values whenever liveState updates externally (e.g. via Voice directives)
+  React.useEffect(() => {
+    if (liveState) {
+      if (liveState.ai_reqs !== undefined) setLocalAi(liveState.ai_reqs);
+      if (liveState.api_reqs !== undefined) setLocalApi(liveState.api_reqs);
+      if (liveState.users !== undefined) setLocalUsers(liveState.users);
+      if (liveState.batch !== undefined) setLocalBatch(liveState.batch);
+    }
+  }, [liveState?.ai_reqs, liveState?.api_reqs, liveState?.users, liveState?.batch]);
+
   const isRunning = liveState?.running ?? false;
   const tick = liveState?.tick ?? 0;
   const power = liveState?.power ?? 140.0;
@@ -79,6 +89,19 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
       api_reqs: key === 'api_reqs' ? value : localApi,
       users: key === 'users' ? value : localUsers,
       batch: key === 'batch' ? value : localBatch
+    });
+  };
+
+  const applyPreset = (ai: number, api: number, users: number, batch: number) => {
+    setLocalAi(ai);
+    setLocalApi(api);
+    setLocalUsers(users);
+    setLocalBatch(batch);
+    onSendControl('params', {
+      ai_reqs: ai,
+      api_reqs: api,
+      users: users,
+      batch: batch
     });
   };
 
@@ -320,14 +343,48 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left 2 Cols: Real-Time Workload Sliders */}
         <div className="lg:col-span-2 p-5 rounded-2xl bg-[#0d0d22] border border-white/5 shadow-xl space-y-4">
-          <div className="flex items-center justify-between border-b border-white/10 pb-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-white/10 pb-3 gap-2">
             <div className="flex items-center gap-2">
               <Sliders className="w-4 h-4 text-sky-400" />
               <h3 className="text-sm font-bold text-white tracking-wide">Dynamic Workload Injector</h3>
+              {localAi === 100 && localApi === 500 && localUsers === 200 && localBatch === 5 && (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/40 font-bold animate-pulse">
+                  ⚡ MAXIMUM LIMIT (1,130W)
+                </span>
+              )}
             </div>
             <div className="text-xs font-mono text-zinc-400">
-              Computed GPU Power: <strong className="text-amber-400">{power.toFixed(1)} Watts</strong>
+              Computed GPU Power: <strong className={power > 900 ? 'text-red-400 font-bold' : 'text-amber-400'}>{power.toFixed(1)} Watts</strong>
             </div>
+          </div>
+
+          {/* Quick Preset Injection Chips */}
+          <div className="flex flex-wrap items-center gap-2 pb-1">
+            <span className="text-[11px] font-mono text-zinc-400 mr-1">Quick Scale:</span>
+            <button
+              onClick={() => applyPreset(15, 50, 20, 0)}
+              className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-[11px] font-mono text-zinc-300 border border-zinc-700 cursor-pointer"
+            >
+              🟢 Idle (~150W)
+            </button>
+            <button
+              onClick={() => applyPreset(50, 250, 100, 2)}
+              className="px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-[11px] font-mono text-amber-300 border border-amber-500/30 cursor-pointer"
+            >
+              🟡 Medium Load (~555W)
+            </button>
+            <button
+              onClick={() => applyPreset(80, 400, 160, 4)}
+              className="px-2.5 py-1 rounded-lg bg-orange-500/20 hover:bg-orange-500/30 text-[11px] font-mono text-orange-300 border border-orange-500/40 cursor-pointer"
+            >
+              🟠 Heavy Load (~920W)
+            </button>
+            <button
+              onClick={() => applyPreset(100, 500, 200, 5)}
+              className="px-2.5 py-1 rounded-lg bg-red-500/25 hover:bg-red-500/35 text-[11px] font-mono text-red-300 border border-red-500/50 font-bold cursor-pointer"
+            >
+              🔴 Max Limit (1,130W Peak)
+            </button>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 pt-1">
@@ -335,12 +392,13 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
             <div className="space-y-1.5">
               <div className="flex justify-between text-xs font-mono">
                 <span className="text-zinc-300">AI Inference Reqs/sec (~3W each)</span>
-                <span className="text-emerald-400 font-bold">{localAi} req/s</span>
+                <span className={`font-bold ${localAi >= 80 ? 'text-amber-400' : 'text-emerald-400'}`}>{localAi} req/s</span>
               </div>
               <input
                 type="range"
                 min="0"
                 max="100"
+                step="1"
                 value={localAi}
                 onChange={e => updateParam('ai_reqs', Number(e.target.value))}
                 className="w-full accent-[#2ed573] h-1.5 bg-[#181836] rounded-lg cursor-pointer"
@@ -355,12 +413,13 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
             <div className="space-y-1.5">
               <div className="flex justify-between text-xs font-mono">
                 <span className="text-zinc-300">API Requests/sec (~0.3W each)</span>
-                <span className="text-sky-400 font-bold">{localApi} req/s</span>
+                <span className={`font-bold ${localApi >= 400 ? 'text-amber-400' : 'text-sky-400'}`}>{localApi} req/s</span>
               </div>
               <input
                 type="range"
                 min="0"
                 max="500"
+                step="5"
                 value={localApi}
                 onChange={e => updateParam('api_reqs', Number(e.target.value))}
                 className="w-full accent-sky-400 h-1.5 bg-[#181836] rounded-lg cursor-pointer"
@@ -375,12 +434,13 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
             <div className="space-y-1.5">
               <div className="flex justify-between text-xs font-mono">
                 <span className="text-zinc-300">Active User Sessions (~0.5W each)</span>
-                <span className="text-indigo-400 font-bold">{localUsers} users</span>
+                <span className={`font-bold ${localUsers >= 160 ? 'text-amber-400' : 'text-indigo-400'}`}>{localUsers} users</span>
               </div>
               <input
                 type="range"
                 min="0"
                 max="200"
+                step="5"
                 value={localUsers}
                 onChange={e => updateParam('users', Number(e.target.value))}
                 className="w-full accent-indigo-400 h-1.5 bg-[#181836] rounded-lg cursor-pointer"
@@ -395,12 +455,13 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
             <div className="space-y-1.5">
               <div className="flex justify-between text-xs font-mono">
                 <span className="text-zinc-300">Batch Training Jobs (~100W each)</span>
-                <span className="text-amber-400 font-bold">{localBatch} jobs</span>
+                <span className={`font-bold ${localBatch >= 4 ? 'text-red-400' : 'text-amber-400'}`}>{localBatch} jobs</span>
               </div>
               <input
                 type="range"
                 min="0"
                 max="5"
+                step="1"
                 value={localBatch}
                 onChange={e => updateParam('batch', Number(e.target.value))}
                 className="w-full accent-amber-400 h-1.5 bg-[#181836] rounded-lg cursor-pointer"

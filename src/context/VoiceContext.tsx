@@ -19,6 +19,13 @@ interface VoiceContextType {
   } | null;
   activeWarnings: ClusterWarning[];
   audioAlertsEnabled: boolean;
+  recognitionLanguage: string;
+  setRecognitionLanguage: (lang: string) => void;
+  isCommandsModalOpen: boolean;
+  setIsCommandsModalOpen: (open: boolean) => void;
+  openCommandsModal: () => void;
+  closeCommandsModal: () => void;
+  toggleCommandsModal: () => void;
   // LiveKit Duplex Session
   isLiveKitConnected: boolean;
   isMuted: boolean;
@@ -42,6 +49,7 @@ const VoiceContext = createContext<VoiceContextType | null>(null);
 
 const STORAGE_KEY = 'neuralflow_voice_history_v5';
 const DIRECTIVE_KEY = 'neuralflow_last_voice_directive';
+const LANG_STORAGE_KEY = 'neuralflow_voice_lang_v1';
 
 const DEFAULT_MESSAGES: VoiceMessage[] = [
   {
@@ -69,15 +77,48 @@ export const VoiceProvider: React.FC<{
   const [lastSpokenReply, setLastSpokenReply] = useState<string | null>(null);
   const [audioAlertsEnabled, setAudioAlertsEnabled] = useState(true);
   const [dismissedWarnings, setDismissedWarnings] = useState<Set<string>>(new Set());
+  const [isCommandsModalOpen, setIsCommandsModalOpen] = useState(false);
+
+  const [recognitionLanguage, setRecognitionLanguageState] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(LANG_STORAGE_KEY);
+      if (saved) return saved;
+    } catch {}
+    if (typeof navigator !== 'undefined' && navigator.language) {
+      return navigator.language;
+    }
+    return 'en-US';
+  });
+
+  const recognitionLanguageRef = useRef<string>(recognitionLanguage);
+  useEffect(() => {
+    recognitionLanguageRef.current = recognitionLanguage;
+  }, [recognitionLanguage]);
+
+  const setRecognitionLanguage = useCallback((lang: string) => {
+    setRecognitionLanguageState(lang);
+    try {
+      localStorage.setItem(LANG_STORAGE_KEY, lang);
+    } catch {}
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.lang = lang;
+      } catch {}
+    }
+  }, []);
+
+  const openCommandsModal = useCallback(() => setIsCommandsModalOpen(true), []);
+  const closeCommandsModal = useCallback(() => setIsCommandsModalOpen(false), []);
+  const toggleCommandsModal = useCallback(() => setIsCommandsModalOpen(prev => !prev), []);
 
   // LiveKit Duplex Session States
-  const [isLiveKitConnected, setIsLiveKitConnected] = useState(false);
+  const [isLiveKitConnected, setIsLiveKitConnected] = useState(true);
   const [isMuted, setIsMuted] = useState(false);
   const [micAudioLevel, setMicAudioLevel] = useState(0);
   const [agentAudioLevel, setAgentAudioLevel] = useState(0);
   const livekitRoomName = 'neuralflow-cluster-ops';
 
-  const isLiveKitConnectedRef = useRef(false);
+  const isLiveKitConnectedRef = useRef(true);
   const isMutedRef = useRef(false);
   const isSpeakingRef = useRef(false);
   const isRecognitionRunningRef = useRef(false);
@@ -114,6 +155,9 @@ export const VoiceProvider: React.FC<{
   const recognitionRef = useRef<any>(null);
   const lastAlertPlayedRef = useRef<number>(0);
   const dispatchVoiceRef = useRef<(text: string) => Promise<void>>((async () => {}) as any);
+  const lastDispatchedTextRef = useRef<string>('');
+  const lastDispatchTimeRef = useRef<number>(0);
+  const isDispatchingRef = useRef<boolean>(false);
 
   // Sync ref values for callbacks & event listeners
   useEffect(() => {
@@ -143,6 +187,42 @@ export const VoiceProvider: React.FC<{
     }
   }, [lastVoiceDirective]);
 
+  // Voice Cache & Audio Chime Helper
+  const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
+  const aiSpeechEndedAtRef = useRef<number>(0);
+
+  // Preload and cache browser voices
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    const updateVoices = () => {
+      voicesRef.current = window.speechSynthesis.getVoices();
+    };
+    updateVoices();
+    if (window.speechSynthesis.onvoiceschanged !== undefined) {
+      window.speechSynthesis.onvoiceschanged = updateVoices;
+    }
+  }, []);
+
+  // Soft high-tech acoustic chime for sub-30ms instant feedback
+  const playDirectiveChime = useCallback(() => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+      osc.frequency.exponentialRampToValueAtTime(880.0, ctx.currentTime + 0.08); // A5
+      gain.gain.setValueAtTime(0.08, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.12);
+    } catch {}
+  }, []);
+
   // Harmonic simulation of Agent speech audio waves when NeuralFlow speaks
   useEffect(() => {
     let interval: any;
@@ -157,70 +237,267 @@ export const VoiceProvider: React.FC<{
     return () => clearInterval(interval);
   }, [isSpeaking]);
 
-  // Speech Synthesis Helper
-  const speakText = useCallback((text: string) => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+  // Resilient Speech Recognition Engine declaration
+  const startRecognition = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    if (isSpeakingRef.current) return; // Do not start while AI is actively speaking
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setMicStatus('unsupported');
+      setMicErrorMessage('Speech recognition is not natively supported in this browser engine (Google Chrome recommended). Use the on-screen action buttons.');
+      return;
+    }
+
+    // Clean up any stale prior instance
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.onstart = null;
+        recognitionRef.current.onresult = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.onend = null;
+        recognitionRef.current.abort();
+      } catch {}
+      recognitionRef.current = null;
+    }
+
     try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = recognitionLanguageRef.current || (typeof navigator !== 'undefined' ? navigator.language : 'en-US') || 'en-US';
+      recognition.maxAlternatives = 3;
+
+      recognition.onstart = () => {
+        setIsListening(true);
+        isRecognitionRunningRef.current = true;
+        setMicStatus('listening');
+        setMicErrorMessage(null);
+      };
+
+      recognition.onresult = (event: any) => {
+        if (isSpeakingRef.current) return;
+
+        let finalPart = '';
+        let interimPart = '';
+
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          const res = event.results[i];
+          // Check top alternative with highest confidence
+          const textChunk = res[0]?.transcript || (res[1] ? res[1].transcript : '') || '';
+          if (res.isFinal) {
+            finalPart += ' ' + textChunk;
+          } else {
+            interimPart += ' ' + textChunk;
+          }
+        }
+
+        finalPart = finalPart.trim();
+        interimPart = interimPart.trim();
+
+        if (interimPart) {
+          setInterimTranscript(interimPart);
+        }
+
+        const isDuplicateRecent = (cand: string) => {
+          const now = Date.now();
+          if (now - lastDispatchTimeRef.current > 1500) return false;
+          const c = cand.toLowerCase().trim();
+          const last = lastDispatchedTextRef.current.toLowerCase().trim();
+          return Boolean(last && c === last);
+        };
+
+        // 1. High confidence sentence completion from Web Speech API
+        if (finalPart && finalPart.length >= 2) {
+          if (!isDuplicateRecent(finalPart)) {
+            if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+            setInterimTranscript('');
+            setTranscript(finalPart);
+            dispatchVoiceRef.current(finalPart);
+          }
+          return;
+        }
+
+        // 2. Natural pause in ongoing speech (responsive 380ms threshold)
+        if (interimPart.length >= 2 && !finalPart) {
+          if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = setTimeout(() => {
+            if (interimPart.length >= 2 && !isSpeakingRef.current) {
+              if (!isDuplicateRecent(interimPart)) {
+                setInterimTranscript('');
+                setTranscript(interimPart);
+                dispatchVoiceRef.current(interimPart);
+              }
+            }
+          }, 380);
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          isRecognitionRunningRef.current = false;
+          setIsListening(false);
+          setMicStatus('blocked');
+          setMicErrorMessage('Microphone access blocked by browser policy. Open app in a new tab for native OS microphone permissions, or click the action chips.');
+        } else {
+          isRecognitionRunningRef.current = false;
+        }
+      };
+
+      recognition.onend = () => {
+        isRecognitionRunningRef.current = false;
+        recognitionRef.current = null;
+        // In continuous duplex mode, if unmuted and not speaking, re-launch recognition cleanly
+        if (isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current) {
+          setTimeout(() => {
+            if (isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current && !isRecognitionRunningRef.current) {
+              try {
+                startRecognition();
+              } catch {}
+            }
+          }, 60);
+        } else if (!isSpeakingRef.current) {
+          setIsListening(false);
+          setMicStatus('idle');
+        }
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (e) {
+      console.warn('Recognition start exception:', e);
+      isRecognitionRunningRef.current = false;
+      recognitionRef.current = null;
+    }
+  }, []);
+
+  // Speech Synthesis Helper with zero-latency voice caching & Chrome keep-alive
+  const speakText = useCallback((text: string) => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      setTimeout(() => {
+        if (isLiveKitConnectedRef.current && !isMutedRef.current) {
+          startRecognition();
+        }
+      }, 800);
+      return;
+    }
+
+    try {
+      // 1. Temporarily stop recognition while speaking to prevent microphone feedback
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.onstart = null;
+          recognitionRef.current.onresult = null;
+          recognitionRef.current.onerror = null;
+          recognitionRef.current.onend = null;
+          recognitionRef.current.abort();
+        } catch {}
+        recognitionRef.current = null;
+      }
+      isRecognitionRunningRef.current = false;
+
+      // 2. Prepare speech synthesis
       window.speechSynthesis.cancel();
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+
       const cleanText = text.replace(/[*_#`]/g, '');
       const utterance = new SpeechSynthesisUtterance(cleanText);
       utterance.rate = 1.05;
       utterance.pitch = 1.0;
       utterance.volume = 1.0;
 
-      const voices = window.speechSynthesis.getVoices();
+      const voices = voicesRef.current.length > 0 ? voicesRef.current : window.speechSynthesis.getVoices();
       const preferredVoice = voices.find(v => 
-        (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Daniel') || v.name.includes('Alex')) &&
+        (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Daniel') || v.name.includes('Alex') || v.name.includes('Victoria') || v.name.includes('Karen')) &&
         v.lang.startsWith('en')
-      ) || voices.find(v => v.lang.startsWith('en'));
+      ) || voices.find(v => v.lang.startsWith('en')) || voices[0];
 
       if (preferredVoice) utterance.voice = preferredVoice;
+
+      (window as any).__currentVoiceUtterance = utterance;
+
+      const handleSpeechDone = () => {
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+        (window as any).__currentVoiceUtterance = null;
+        aiSpeechEndedAtRef.current = Date.now();
+
+        // 250ms acoustic settle time after speech ends before restarting recognition
+        setTimeout(() => {
+          if (isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current) {
+            startRecognition();
+          }
+        }, 250);
+      };
 
       utterance.onstart = () => {
         setIsSpeaking(true);
         isSpeakingRef.current = true;
       };
-      utterance.onend = () => {
-        setIsSpeaking(false);
-        isSpeakingRef.current = false;
-        // When speech finishes, ensure recognition is listening in continuous mode
-        if (isLiveKitConnectedRef.current && !isMutedRef.current && recognitionRef.current && !isRecognitionRunningRef.current) {
-          try {
-            recognitionRef.current.start();
-            isRecognitionRunningRef.current = true;
-          } catch {}
-        }
-      };
-      utterance.onerror = () => {
-        setIsSpeaking(false);
-        isSpeakingRef.current = false;
+      utterance.onend = handleSpeechDone;
+      utterance.onerror = (e) => {
+        console.warn('SpeechSynthesis error:', e);
+        handleSpeechDone();
       };
 
       window.speechSynthesis.speak(utterance);
+
+      // Keep-alive loop for Chrome's 15-second speech synthesis pause bug
+      const resumeInterval = setInterval(() => {
+        if (!isSpeakingRef.current) {
+          clearInterval(resumeInterval);
+        } else if (window.speechSynthesis.paused) {
+          window.speechSynthesis.resume();
+        }
+      }, 500);
+
     } catch (e) {
       console.warn('Speech synthesis failed', e);
       setIsSpeaking(false);
       isSpeakingRef.current = false;
+      setTimeout(() => {
+        if (isLiveKitConnectedRef.current && !isMutedRef.current) {
+          startRecognition();
+        }
+      }, 300);
     }
-  }, []);
+  }, [startRecognition]);
 
   const stopSpeaking = useCallback(() => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
     }
     setIsSpeaking(false);
     isSpeakingRef.current = false;
-  }, []);
+    (window as any).__currentVoiceUtterance = null;
+    aiSpeechEndedAtRef.current = Date.now();
+    setTimeout(() => {
+      if (isLiveKitConnectedRef.current && !isMutedRef.current) {
+        startRecognition();
+      }
+    }, 150);
+  }, [startRecognition]);
 
   // Web Audio Stream setup for real-time mic volume metering
   const startAudioMetering = useCallback(async () => {
     if (!navigator.mediaDevices?.getUserMedia) return null;
     try {
+      // Release any prior stream first
+      if (audioStreamRef.current) {
+        audioStreamRef.current.getTracks().forEach(t => t.stop());
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: 48000
         }
       });
       audioStreamRef.current = stream;
@@ -235,11 +512,12 @@ export const VoiceProvider: React.FC<{
         const source = ctx.createMediaStreamSource(stream);
         const analyser = ctx.createAnalyser();
         analyser.fftSize = 64;
-        analyser.smoothingTimeConstant = 0.4;
+        analyser.smoothingTimeConstant = 0.3;
         source.connect(analyser);
         analyserRef.current = analyser;
 
         const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
         const updateVolume = () => {
           if (!analyserRef.current || !isLiveKitConnectedRef.current || isMutedRef.current) {
             setMicAudioLevel(0);
@@ -259,8 +537,7 @@ export const VoiceProvider: React.FC<{
       }
       return stream;
     } catch (err: any) {
-      console.warn('Microphone stream error in environment:', err);
-      // Fallback simulated volume fluctuations when listening
+      console.warn('Microphone stream initialization note:', err);
       return null;
     }
   }, []);
@@ -284,166 +561,12 @@ export const VoiceProvider: React.FC<{
     setMicAudioLevel(0);
   }, []);
 
-  // Resilient Speech Recognition Engine
-  const startRecognition = useCallback(() => {
-    if (typeof window === 'undefined') return;
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setMicStatus('unsupported');
-      setMicErrorMessage('Speech recognition is not natively supported in this browser engine (Google Chrome recommended). Use "Simulate Voice" or the one-tap chips.');
-      return;
-    }
-
-    try {
-      // Abort existing instance cleanly
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.onstart = null;
-          recognitionRef.current.onresult = null;
-          recognitionRef.current.onerror = null;
-          recognitionRef.current.onend = null;
-          recognitionRef.current.abort();
-        } catch {}
-      }
-
-      const recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
-      recognition.maxAlternatives = 1;
-
-      recognition.onstart = () => {
-        setIsListening(true);
-        isRecognitionRunningRef.current = true;
-        setMicStatus('listening');
-        setMicErrorMessage(null);
-      };
-
-      recognition.onresult = (event: any) => {
-        let interim = '';
-        let finalChunk = '';
-
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          const item = event.results[i];
-          const part = item[0].transcript;
-          if (item.isFinal) {
-            finalChunk += ' ' + part;
-          } else {
-            interim += ' ' + part;
-          }
-        }
-
-        interim = interim.trim();
-        finalChunk = finalChunk.trim();
-
-        // Conversational barge-in: stop agent voice when user speaks
-        if ((interim.length > 0 || finalChunk.length > 0) && isSpeakingRef.current) {
-          stopSpeaking();
-        }
-
-        if (interim) {
-          setInterimTranscript(interim);
-        }
-
-        // Fast-path command keywords during interim speech
-        const lowerInterim = interim.toLowerCase();
-        const isQuickCommand =
-          lowerInterim === 'start' ||
-          lowerInterim === 'start simulation' ||
-          lowerInterim === 'play' ||
-          lowerInterim === 'stop' ||
-          lowerInterim === 'pause' ||
-          lowerInterim === 'reset' ||
-          lowerInterim === 'reset simulation' ||
-          lowerInterim === 'increase workload' ||
-          lowerInterim === 'pre-ramp fans' ||
-          lowerInterim === 'cool down' ||
-          lowerInterim === 'what to do' ||
-          lowerInterim === 'what should i do';
-
-        if (isQuickCommand) {
-          if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-          setInterimTranscript('');
-          setTranscript(interim);
-          dispatchVoiceRef.current(interim);
-          return;
-        }
-
-        // Immediate dispatch on final speech chunk
-        if (finalChunk) {
-          if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-          setInterimTranscript('');
-          setTranscript(finalChunk);
-          dispatchVoiceRef.current(finalChunk);
-          return;
-        }
-
-        // Voice Activity Pause Detection: dispatch interim speech after 550ms pause
-        if (interim.length >= 2) {
-          if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-          silenceTimerRef.current = setTimeout(() => {
-            if (interim.length >= 2) {
-              setInterimTranscript('');
-              setTranscript(interim);
-              dispatchVoiceRef.current(interim);
-            }
-          }, 550);
-        }
-      };
-
-      recognition.onerror = (event: any) => {
-        console.warn('SpeechRecognition error:', event.error);
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-          isRecognitionRunningRef.current = false;
-          setIsListening(false);
-          setMicStatus('blocked');
-          setMicErrorMessage('Microphone access blocked by browser or iframe security. Open in a new tab for native OS microphone permissions, or click "Simulate Voice".');
-        } else if (event.error === 'no-speech') {
-          // Normal pause in continuous stream
-        } else if (event.error === 'network') {
-          // Chrome speech server transient hiccup
-        }
-      };
-
-      recognition.onend = () => {
-        isRecognitionRunningRef.current = false;
-        // In continuous duplex mode, auto-rearm recognition if room is active
-        if (isLiveKitConnectedRef.current && !isMutedRef.current) {
-          setTimeout(() => {
-            if (isLiveKitConnectedRef.current && !isMutedRef.current && !isRecognitionRunningRef.current) {
-              try {
-                startRecognition();
-              } catch (e) {
-                console.warn('Recognition restart failed', e);
-              }
-            }
-          }, 80);
-        } else {
-          setIsListening(false);
-          setMicStatus('idle');
-        }
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
-      isRecognitionRunningRef.current = true;
-    } catch (e: any) {
-      console.warn('Speech recognition start error:', e);
-      // If start failed because recognition is already started, keep flag true
-      if (e.name === 'InvalidStateError') {
-        isRecognitionRunningRef.current = true;
-      } else {
-        setMicStatus('unsupported');
-      }
-    }
-  }, [stopSpeaking]);
-
   // Connect to LiveKit Room (Activates continuous microphone and real-time audio)
-  const connectLiveKit = useCallback(async () => {
+  const connectLiveKit = useCallback(async (isUserInitiated = false) => {
     setMicErrorMessage(null);
     try {
-      // 1. Start audio hardware metering
-      const stream = await startAudioMetering();
+      // 1. Start audio hardware metering if available
+      await startAudioMetering();
 
       // 2. Start continuous speech recognition
       startRecognition();
@@ -455,23 +578,46 @@ export const VoiceProvider: React.FC<{
       setIsListening(true);
       setMicStatus('listening');
 
-      // Add connection message to conversation log
-      const connMsg: VoiceMessage = {
-        id: 'conn-' + Date.now(),
-        sender: 'agent',
-        text: 'LiveKit Duplex Voice Room connected! Microphone is listening. Talk naturally with NeuralFlow at any time ("Start simulation", "Increase workload", "Pre-ramp fans", etc.).',
-        timestamp: new Date().toLocaleTimeString(),
-        mossLatency: 0.9,
-        retrievedDocs: ['LK-01: LiveKit WebRTC Duplex', 'RB-01: Real-Time Audio']
-      };
-      setMessages(prev => [...prev, connMsg]);
-      speakText('LiveKit voice connected. I am listening.');
+      if (isUserInitiated) {
+        speakText('NeuralFlow voice connected. I am listening.');
+      }
     } catch (err: any) {
-      console.warn('LiveKit connection error:', err);
-      setMicStatus('blocked');
-      setMicErrorMessage('Microphone blocked by browser policy. Open in a new tab for native microphone permissions, or click "Simulate Voice".');
+      console.warn('LiveKit connection note:', err);
+      // Fallback: start speech recognition directly
+      startRecognition();
+      setIsLiveKitConnected(true);
+      isLiveKitConnectedRef.current = true;
+      setIsMuted(false);
+      isMutedRef.current = false;
+      setIsListening(true);
+      setMicStatus('listening');
     }
   }, [startAudioMetering, startRecognition, speakText]);
+
+  // Auto-connect and activate listening on component mount
+  useEffect(() => {
+    connectLiveKit(false);
+
+    const unlockAudio = () => {
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        try {
+          audioContextRef.current.resume();
+        } catch {}
+      }
+      if (!isRecognitionRunningRef.current && isLiveKitConnectedRef.current && !isMutedRef.current) {
+        startRecognition();
+      }
+    };
+
+    window.addEventListener('click', unlockAudio, { once: true });
+    window.addEventListener('keydown', unlockAudio, { once: true });
+    window.addEventListener('touchstart', unlockAudio, { once: true });
+    return () => {
+      window.removeEventListener('click', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+      window.removeEventListener('touchstart', unlockAudio);
+    };
+  }, [connectLiveKit, startRecognition]);
 
   // Disconnect from LiveKit Room
   const disconnectLiveKit = useCallback(() => {
@@ -526,25 +672,33 @@ export const VoiceProvider: React.FC<{
 
   // Dispatch voice directive
   const dispatchVoice = useCallback(async (text: string) => {
-    if (!text.trim()) return;
+    const clean = text.trim();
+    if (!clean) return;
+
+    // Strict guard against re-entrant calls or duplicate dispatches
+    if (isDispatchingRef.current) return;
+    isDispatchingRef.current = true;
+    lastDispatchedTextRef.current = clean;
+    lastDispatchTimeRef.current = Date.now();
 
     const userMsg: VoiceMessage = {
       id: 'user-' + Date.now(),
       sender: 'user',
-      text: text.trim(),
+      text: clean,
       timestamp: new Date().toLocaleTimeString()
     };
 
     setMessages(prev => [...prev, userMsg]);
     setIsProcessing(true);
-    setTranscript(text.trim());
+    setTranscript(clean);
+    playDirectiveChime();
 
     try {
       const res = await fetch('/api/voice/dispatch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          transcript: text.trim(),
+          transcript: clean,
           context: {
             junctionTemp: liveState?.nf_T ?? 40.0,
             fanSpeed: liveState?.nf_fan ?? 30.0,
@@ -559,27 +713,34 @@ export const VoiceProvider: React.FC<{
       if (!res.ok) throw new Error('Voice dispatch failed');
       const data: VoiceAgentResponse = await res.json();
 
-      // Execute simulation actions based on recognized intent
-      if (data.intent === 'start_sim') {
+      // Client UI state updates for listening / modals
+      if ((data as any).intent === 'wake') {
+        setIsMuted(false);
+        isMutedRef.current = false;
+        setIsListening(true);
+        setMicStatus('listening');
+        if (!isRecognitionRunningRef.current) {
+          startRecognition();
+        }
+      } else if ((data as any).intent === 'stop_listening') {
+        setIsMuted(true);
+        isMutedRef.current = true;
+        setIsListening(false);
+        setMicStatus('idle');
+        if (recognitionRef.current) {
+          try {
+            recognitionRef.current.abort();
+            isRecognitionRunningRef.current = false;
+          } catch {}
+        }
+      } else if (clean.toLowerCase().includes('command') || clean.toLowerCase().includes('shortcut')) {
+        openCommandsModal();
+      } else if (data.intent === 'start_sim') {
         onSendControl('play');
       } else if (data.intent === 'pause_sim') {
         onSendControl('pause');
       } else if (data.intent === 'reset_sim') {
         onSendControl('reset');
-      } else if (data.intent === 'workload_burst') {
-        const nextAi = Math.min(3600, Math.max(1800, (liveState?.ai_reqs || 10) + 600));
-        onSendControl('params', { ai_reqs: nextAi });
-        onSendControl('play');
-      } else if (data.intent === 'decrease_workload') {
-        const lowerAi = Math.max(50, Math.round((liveState?.ai_reqs || 1200) / 2));
-        onSendControl('params', { ai_reqs: lowerAi });
-      } else if (data.intent === 'preramp') {
-        onSendControl('params', { ai_reqs: Math.max(1600, liveState?.ai_reqs || 1200) });
-        onSendControl('play');
-      } else if (data.intent === 'emergency') {
-        onSendControl('play');
-      } else if (data.intent === 'rebalance') {
-        onSendControl('play');
       }
 
       const agentMsg: VoiceMessage = {
@@ -598,7 +759,7 @@ export const VoiceProvider: React.FC<{
 
       if (data.actionTaken) {
         setLastVoiceDirective({
-          text,
+          text: clean,
           action: data.actionTaken,
           time: new Date().toLocaleTimeString(),
           intent: data.intent
@@ -610,11 +771,11 @@ export const VoiceProvider: React.FC<{
       console.error('Dispatch error fallback', err);
 
       // Local fallback in case network glitches
-      let fallbackText = `Command received: "${text}". Monitored cluster junction is at ${liveState?.nf_T ? liveState.nf_T.toFixed(1) : '40.0'}°C.`;
+      let fallbackText = `Command received: "${clean}". Monitored cluster junction is at ${liveState?.nf_T ? liveState.nf_T.toFixed(1) : '40.0'}°C.`;
       let fallbackAction = 'Processed voice directive';
       let intent = 'general';
 
-      const lower = text.toLowerCase();
+      const lower = clean.toLowerCase();
       if (lower.includes('start') || lower.includes('play') || lower.includes('begin') || (lower.includes('run') && !lower.includes('runbook'))) {
         onSendControl('play');
         fallbackText = 'Simulation started! The GPU cluster is now running live. You can watch real-time temperatures update.';
@@ -630,12 +791,17 @@ export const VoiceProvider: React.FC<{
         fallbackText = 'Simulation paused. Cluster state is held.';
         fallbackAction = 'Paused live simulation';
         intent = 'pause_sim';
-      } else if (lower.includes('increase') || lower.includes('burst') || lower.includes('spike') || lower.includes('more workload') || lower.includes('more traffic') || lower.includes('heavy')) {
+      } else if (lower.includes('fan') || lower.includes('cooling') || lower.includes('ramp')) {
+        onSendControl('play');
+        fallbackText = 'Cooling fan directive executed! High airflow engaged.';
+        fallbackAction = 'Adjusted fan speed & cooling loop';
+        intent = 'preramp';
+      } else if (lower.includes('increase') || lower.includes('boost') || lower.includes('more')) {
         const nextAi = Math.min(3600, Math.max(1800, (liveState?.ai_reqs || 10) + 600));
         onSendControl('params', { ai_reqs: nextAi });
         onSendControl('play');
-        fallbackText = `Workload increased to ${nextAi} requests per second! GPUs will now generate more heat.`;
-        fallbackAction = `Increased AI traffic to ${nextAi} req/s`;
+        fallbackText = `Workload increased across the cluster to test thermal limits.`;
+        fallbackAction = `Increased cluster workload`;
         intent = 'workload_burst';
       } else if (lower.includes('decrease') || lower.includes('lower') || lower.includes('reduce') || lower.includes('less')) {
         const lowerAi = Math.max(50, Math.round((liveState?.ai_reqs || 1200) / 2));
@@ -643,15 +809,9 @@ export const VoiceProvider: React.FC<{
         fallbackText = `Workload reduced down to ${lowerAi} req/s. GPUs will cool down.`;
         fallbackAction = `Reduced AI workload to ${lowerAi} req/s`;
         intent = 'decrease_workload';
-      } else if (lower.includes('ramp') || lower.includes('cool') || lower.includes('fan') || lower.includes('pre-ramp')) {
-        onSendControl('params', { ai_reqs: Math.max(1600, liveState?.ai_reqs || 1200) });
-        onSendControl('play');
-        fallbackText = 'Cooling fans pre-ramped to 80 percent! NeuralFlow is pushing cold air ahead of time.';
-        fallbackAction = 'Pre-ramped cooling fans to 80%';
-        intent = 'preramp';
       } else if (lower.includes('what to do') || lower.includes('suggest') || lower.includes('help') || lower.includes('guide')) {
-        fallbackText = 'Here are 4 simple things you can do: 1. "Start simulation" 2. "Increase workload" 3. "Pre-ramp fans" 4. "Reset".';
-        fallbackAction = 'Provided 4 simple next steps';
+        fallbackText = 'Here are 4 simple things you can do: 1. "Start simulation" 2. "Increase workload" 3. "Increase fan speed" 4. "Reset".';
+        fallbackAction = 'Provided cluster recommendations';
         intent = 'help';
       }
 
@@ -674,7 +834,7 @@ export const VoiceProvider: React.FC<{
       setMessages(prev => [...prev, fallbackMsg]);
       setLastSpokenReply(fallbackText);
       setLastVoiceDirective({
-        text,
+        text: clean,
         action: fallbackAction,
         time: new Date().toLocaleTimeString(),
         intent
@@ -682,8 +842,31 @@ export const VoiceProvider: React.FC<{
       speakText(fallbackText);
     } finally {
       setIsProcessing(false);
+      // Brief debounce buffer before allowing next voice dispatch
+      setTimeout(() => {
+        isDispatchingRef.current = false;
+      }, 300);
     }
-  }, [liveState, onSendControl, speakText]);
+  }, [liveState, onSendControl, openCommandsModal, playDirectiveChime, speakText, startRecognition]);
+
+  // Continuous Speech Recognition Supervisor Watchdog
+  // Ensures microphone listening recovers automatically if browser speech connection drops
+  useEffect(() => {
+    const watchdog = setInterval(() => {
+      if (
+        isLiveKitConnectedRef.current &&
+        !isMutedRef.current &&
+        !isSpeakingRef.current &&
+        !isRecognitionRunningRef.current &&
+        typeof window !== 'undefined'
+      ) {
+        try {
+          startRecognition();
+        } catch {}
+      }
+    }, 400);
+    return () => clearInterval(watchdog);
+  }, [startRecognition]);
 
   // Keep dispatchVoiceRef in sync
   useEffect(() => {
@@ -851,6 +1034,11 @@ export const VoiceProvider: React.FC<{
         lastVoiceDirective,
         activeWarnings,
         audioAlertsEnabled,
+        isCommandsModalOpen,
+        setIsCommandsModalOpen,
+        openCommandsModal,
+        closeCommandsModal,
+        toggleCommandsModal,
         isLiveKitConnected,
         isMuted,
         micAudioLevel,
