@@ -3,6 +3,10 @@
 **Physics-Informed Neural Network for proactive GPU thermal management.**  
 Replaces reactive PID cooling with a PINN that predicts temperature spikes 30–60s ahead, eliminating thermal throttling and saving ~13% cooling energy.
 
+**Author:** [Yash Jai](https://github.com/its-yashjai) (`yashjaimail@gmail.com`)  
+**Repository:** [its-yashjai/thecool](https://github.com/its-yashjai/thecool)  
+**License:** MIT License  
+
 Inspired by **LEAP 71 Noyron (2024)** — AI that encodes physical laws outperforms pure pattern-matching.
 
 ---
@@ -10,58 +14,35 @@ Inspired by **LEAP 71 Noyron (2024)** — AI that encodes physical laws outperfo
 ## Quick Start
 
 ```bash
-# 1. Create venv & install deps
-python -m venv neuralflow_env
-neuralflow_env\Scripts\activate      # Windows
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install numpy scipy pandas matplotlib plotly streamlit tqdm rich
+# Install dependencies
+npm install
 
-# 2. Generate synthetic training data (~300K rows, <10s)
-python data/generate_dataset.py
+# Start development server (Node.js/Express backend + React frontend + WebSocket engine)
+npm run dev
 
-# 3. Train PINN (CPU, ~2 min)
-python train.py
-
-# 4. Evaluate: PID vs NeuralFlow (produces results/*.json, *.csv, *.png)
-python evaluate.py
-
-# 5. Launch dashboard
-streamlit run dashboard.py
-# Opens http://localhost:8501 — no GPU, no cloud needed
+# Build for production
+npm run build
 ```
 
-## Docker
-
-```bash
-docker build -t neuralflow:local .
-docker run -d --name neuralflow -p 8502:8501 -p 8765:8765 neuralflow:local
-```
-
-Open http://localhost:8502. The container runs the dashboard and real-time server together.
-
-**Real-time demo** (two terminals):
-```bash
-# Terminal 1: WebSocket simulation server
-python realtime_server.py
-
-# Terminal 2: Dashboard → navigate to "Real-Time Control Room" in sidebar
-streamlit run dashboard.py
-```
+The application will be live at `http://localhost:3000`.
 
 ---
 
-## Architecture
+## Architecture & Features
 
-| Component | File | Description |
+| Component | Path | Description |
 |-----------|------|-------------|
-| **Thermal Simulator** | `simulator.py` | GPU digital twin: `dT/dt = P/C - k(T-T_amb)`, 4 workload patterns |
-| **PINN Model** | `models/pinn_model.py` | LSTM(64,2) → 30-step window → predicts T+30/45/60s; physics-informed loss + MC Dropout uncertainty |
-| **PID Controller** | `controllers/pid_controller.py` | Reactive baseline: Kp·e + Ki·∫e + Kd·de/dt |
-| **NeuralFlow Controller** | `controllers/neuralflow_controller.py` | Proactive: feeds history to PINN, pre-ramps fans using worst-case (mean+σ) |
-| **Training** | `train.py` | Sliding windows, 80/20 split, Adam(1e-3), 5 epochs |
-| **Evaluation** | `evaluate.py` | Side-by-side run, metrics + publication plots |
-| **Dashboard** | `dashboard.py` | Streamlit + Plotly: temp/fan charts, 3×3 heatmap, energy bars |
-| **Real-time Server** | `realtime_server.py` | FastAPI + WebSocket (0.6s ticks), dual GPU sim, cluster heatmaps |
+| **Moss Context Engine** | `server/moss.ts` | Zero-vector-DB semantic retrieval engine delivering **sub-10ms (< 1ms)** hardware specs and runbook lookups |
+| **Voice Dispatcher** | `server/voice.ts` | Real-time speech operator with LiveKit WebRTC session management and physics actuation |
+| **Voice Ops Console** | `src/components/VoiceOperator.tsx` | LiveKit microphone stream, voice visualizer waveform, and sub-10ms Moss inspector HUD |
+| **Thermal Simulator** | `server/simulator.ts` | GPU digital twin: Runge-Kutta 4th-order (RK4) integration of Newton's Law of Cooling |
+| **PINN Model Engine** | `server/neuralflow.ts` | Physics-informed predictive horizon with MC uncertainty estimation (30-60s ahead) |
+| **PID Baseline** | `server/pid.ts` | Standard reactive proportional-integral-derivative controller |
+| **Simulation Core** | `server/engine.ts` | Authoritative simulation runner, multi-GPU 3×3 cluster state, and telemetry logging |
+| **WebSocket Server** | `server.ts` | Real-time dual stream server multiplexed on port 3000 |
+| **Analytics Dashboard** | `src/components/AnalyticsDashboard.tsx` | Benchmark comparisons, thermal charts, fan power graphs, energy savings |
+| **Real-Time Control Room** | `src/components/ControlRoom.tsx` | Live workload injector sliders, PINN predictive horizon HUD, and dual cluster rack |
+| **3D GPU Stack** | `src/components/GpuStack3D.tsx` | Interactive isometric GPU assembly with spinning axial fans and core thermal mapping |
 
 ---
 

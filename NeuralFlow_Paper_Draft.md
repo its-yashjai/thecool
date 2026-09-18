@@ -1,6 +1,7 @@
 # NeuralFlow: A Physics-Informed LSTM Neural Network for Proactive GPU Cluster Thermal Management
 
-**[Authors]** · **[Institution]** · **[Year]**
+**Yash Jai** (<yashjaimail@gmail.com>) · **NeuralFlow Research** · **2026**  
+*Project Repository:* [github.com/its-yashjai/thecool](https://github.com/its-yashjai/thecool)
 
 ---
 
