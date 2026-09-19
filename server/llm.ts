@@ -115,6 +115,58 @@ RULES:
 - You cannot perform actions in this reply. If the operator asks you to do something, tell them the exact command to say, such as "start simulation" or "pre-ramp fans".`;
 }
 
+function buildAgentPrompt(transcript: string, moss: MossSearchResponse | null): string {
+  if (!moss || moss.results.length === 0) {
+    return `You are a helpful general-purpose AI assistant. Answer the user's question clearly, accurately and helpfully in plain English.`;
+  }
+  const docs = moss.results
+    .slice(0, 3)
+    .map((r, i) => {
+      const d = r.document;
+      return `[${i + 1}] (${d.id}) ${d.title}. ${d.summary} ${d.content.slice(0, 480)}${d.actionableProtocol ? ' Action: ' + d.actionableProtocol : ''}`;
+    })
+    .join('\n');
+  return `You are a helpful general-purpose AI assistant. Answer the user's question clearly and accurately.
+
+If the question is about NeuralFlow, datacenter, GPU hardware, runbooks, or thermal management, use the following retrieved context if relevant. If the context is not relevant, answer from your own general knowledge. Do not force the context if it doesn't match.
+
+RETRIEVED CONTEXT (from Moss knowledge base):
+${docs}
+
+Answer helpfully and concisely.`;
+}
+
+export async function askAgent(
+  transcript: string,
+  moss: MossSearchResponse | null
+): Promise<{ text: string; ms: number; model: string }> {
+  const { cfg, client } = load();
+  if (!cfg || !client) throw new Error('LLM not configured');
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
+  const t0 = performance.now();
+  try {
+    const res = await client.chat.completions.create(
+      {
+        model: cfg.model,
+        messages: [
+          { role: 'system', content: buildAgentPrompt(transcript, moss) },
+          { role: 'user', content: transcript },
+        ],
+        temperature: 0.3,
+        max_tokens: 800,
+      },
+      { signal: ctrl.signal }
+    );
+    const text = clean(res.choices[0]?.message?.content ?? '');
+    if (!text) throw new Error('LLM returned an empty answer');
+    return { text, ms: Math.round((performance.now() - t0) * 10) / 10, model: cfg.model };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Returns a spoken answer and its latency, or throws (caller falls back to rules). */
 export async function askLlm(
   transcript: string,

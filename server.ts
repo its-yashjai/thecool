@@ -11,7 +11,7 @@ import { SimulationEngine } from "./server/engine.js";
 import { Retriever } from "./server/retrieval.js";
 import { VoiceDispatcher } from "./server/voice.js";
 import { createLiveKitToken, livekitConfigured, livekitRoomName } from "./server/livekit.js";
-import { llmStatus } from "./server/llm.js";
+import { llmStatus, askAgent } from "./server/llm.js";
 
 async function startServer() {
   const app = express();
@@ -100,6 +100,30 @@ async function startServer() {
     } catch (err: any) {
       console.error("LiveKit token error:", err?.message ?? err);
       res.status(500).json({ configured: true, reason: "Failed to create LiveKit token" });
+    }
+  });
+
+  // General-purpose agent: uses Moss retrieval only for NeuralFlow/datacenter/runbook questions
+  app.post("/api/agent/turn", async (req, res) => {
+    const transcript = String(req.body.transcript || "").trim();
+    if (!transcript) return res.status(400).json({ error: "transcript required" });
+    const q = transcript.toLowerCase();
+    const needsMoss = /neuralflow|datacenter|runbook|\brb-|\bh100\b|\bb200\b|\bgpu\b|throttl|thermal|cooling|forecast|pue|cluster|hardware|guardrail|workload|fan\b|power\b/i.test(q);
+    let moss: any = null;
+    if (needsMoss) {
+      try {
+        moss = await retriever.search(transcript, 3);
+        if (!moss.results || moss.results.length === 0) moss = null;
+      } catch {
+        moss = null;
+      }
+    }
+    try {
+      const out = await askAgent(transcript, moss);
+      res.json({ reply: out.text });
+    } catch (err: any) {
+      console.error("agent turn error:", err?.message ?? err);
+      res.status(500).json({ error: err?.message ?? "LLM failed" });
     }
   });
 
