@@ -1,0 +1,26 @@
+{
+  "when": "2026-09-19T09:00:00.135Z",
+  "mode": "in-process",
+  "backend": "moss",
+  "index": "neural-byo",
+  "docs": 24,
+  "queries": 60,
+  "perQueryBackend": {
+    "in-process": 60
+  },
+  "embeddings": "Xenova/all-MiniLM-L6-v2 (local, semantic)",
+  "embedMs": {
+    "p50": 73.68,
+    "p95": 241.55
+  },
+  "wallClockMs": {
+    "p50": 120.54,
+    "p95": 316.92,
+    "max": 778.98
+  },
+  "reportedMs": {
+    "p50": 119.32,
+    "p95": 316.7
+  },
+  "note": null
+}

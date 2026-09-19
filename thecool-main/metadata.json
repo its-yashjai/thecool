@@ -1,0 +1,6 @@
+{
+  "name": "NeuralFlow",
+  "description": "Physics-Informed Neural Network for proactive GPU thermal management and cooling optimization by Yash Jai",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
