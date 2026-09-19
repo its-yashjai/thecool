@@ -148,9 +148,15 @@ export const VoiceProvider: React.FC<{
   const audioStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const analyserTimeRef = useRef<AnalyserNode | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const filterNodeRef = useRef<BiquadFilterNode | null>(null);
+  const compressorRef = useRef<DynamicsCompressorNode | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const silenceTimerRef = useRef<any>(null);
   const accumulatedTranscriptRef = useRef<string>('');
+  const noiseFloorRef = useRef<number>(-60); // dB, adaptive
+  const lastVoiceAtRef = useRef<number>(0);
 
   const [messages, setMessages] = useState<VoiceMessage[]>(() => {
     try {
@@ -260,7 +266,7 @@ export const VoiceProvider: React.FC<{
     return () => clearInterval(interval);
   }, [isSpeaking]);
 
-  // Resilient Speech Recognition Engine declaration
+  // Resilient Speech Recognition Engine — optimized for noisy environments
   const startRecognition = useCallback(() => {
     if (typeof window === 'undefined') return;
     if (isSpeakingRef.current) return; // Do not start while AI is actively speaking
@@ -303,20 +309,35 @@ export const VoiceProvider: React.FC<{
 
         let finalPart = '';
         let interimPart = '';
+        let bestConfidence = 0;
 
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           const res = event.results[i];
-          // Check top alternative with highest confidence
-          const textChunk = res[0]?.transcript || (res[1] ? res[1].transcript : '') || '';
+          // Pick highest-confidence alternative above threshold
+          let bestText = '';
+          let bestConf = 0;
+          for (let a = 0; a < Math.min(res.length, 3); a++) {
+            const alt = res[a];
+            const conf = typeof alt.confidence === 'number' ? alt.confidence : 0.6;
+            if (alt.transcript && conf > bestConf) {
+              bestConf = conf;
+              bestText = alt.transcript;
+            }
+          }
+          const textChunk = bestText || res[0]?.transcript || '';
+          if (!textChunk) continue;
+          bestConfidence = Math.max(bestConfidence, bestConf);
           if (res.isFinal) {
+            // Filter low-confidence finals (common when noise is mis-recognized)
+            if (bestConf > 0 && bestConf < 0.45) continue;
             finalPart += ' ' + textChunk;
           } else {
             interimPart += ' ' + textChunk;
           }
         }
 
-        finalPart = finalPart.trim();
-        interimPart = interimPart.trim();
+        finalPart = finalPart.trim().replace(/\s+/g, ' ');
+        interimPart = interimPart.trim().replace(/\s+/g, ' ');
 
         if (interimPart) {
           setInterimTranscript(interimPart);
@@ -324,15 +345,40 @@ export const VoiceProvider: React.FC<{
 
         const isDuplicateRecent = (cand: string) => {
           const now = Date.now();
-          if (now - lastDispatchTimeRef.current > 1500) return false;
+          if (now - lastDispatchTimeRef.current > 2200) return false;
           const c = cand.toLowerCase().trim();
           const last = lastDispatchedTextRef.current.toLowerCase().trim();
           return Boolean(last && c === last);
         };
 
-        // 1. High confidence sentence completion from Web Speech API
-        if (finalPart && finalPart.length >= 2) {
+        // Gate: ignore dispatches when mic is essentially silent (noise floor) or AI just spoke
+        const isMicActive = (() => {
+          // Use time-domain energy gate if available
+          if (analyserTimeRef.current) {
+            // checked via lastVoiceAtRef — updated in metering loop
+            return Date.now() - lastVoiceAtRef.current < 1800;
+          }
+          // fallback to level threshold
+          return micAudioLevel > 4;
+        })();
+        const tooSoonAfterSpeech = Date.now() - aiSpeechEndedAtRef.current < 420;
+        if (tooSoonAfterSpeech && !finalPart) return;
+
+        // Require at least 2 words or 5 chars for noisy environments to avoid single-word hallucinations
+        const isValidUtterance = (s: string) => {
+          const w = s.split(/\s+/).filter(Boolean);
+          return s.length >= 4 && w.length >= 1 && !(w.length === 1 && s.length < 5);
+        };
+
+        // 1. Final results — dispatch immediately if confident and mic was active
+        if (finalPart && finalPart.length >= 4) {
+          if (!isValidUtterance(finalPart)) return;
           if (!isDuplicateRecent(finalPart)) {
+            // In noisy room, require either confidence gate or mic activity
+            if (!isMicActive && bestConfidence < 0.55) {
+              // Likely noise hallucination — ignore but keep interim for user feedback
+              return;
+            }
             if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
             setInterimTranscript('');
             setTranscript(finalPart);
@@ -341,18 +387,26 @@ export const VoiceProvider: React.FC<{
           return;
         }
 
-        // 2. Natural pause in ongoing speech (responsive 380ms threshold)
-        if (interimPart.length >= 2 && !finalPart) {
+        // 2. Interim with adaptive silence debounce (longer in noisy conditions)
+        if (interimPart.length >= 4 && !finalPart) {
+          if (!isValidUtterance(interimPart)) return;
+          // Adaptive timeout: 850ms when noisy, 650ms when quiet
+          const noiseFloor = noiseFloorRef.current;
+          const isNoisy = noiseFloor > -42;
+          const debounceMs = isNoisy ? 900 : isMicActive ? 650 : 820;
           if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
           silenceTimerRef.current = setTimeout(() => {
-            if (interimPart.length >= 2 && !isSpeakingRef.current) {
+            if (interimPart.length >= 4 && !isSpeakingRef.current) {
               if (!isDuplicateRecent(interimPart)) {
+                // Re-check mic activity at dispatch time
+                const stillActive = Date.now() - lastVoiceAtRef.current < 2000;
+                if (!stillActive && bestConfidence < 0.5) return;
                 setInterimTranscript('');
                 setTranscript(interimPart);
                 dispatchVoiceRef.current(interimPart);
               }
             }
-          }, 380);
+          }, debounceMs);
         }
       };
 
@@ -362,7 +416,13 @@ export const VoiceProvider: React.FC<{
           setIsListening(false);
           setMicStatus('blocked');
           setMicErrorMessage('Microphone access blocked by browser policy. Open app in a new tab for native OS microphone permissions, or click the action chips.');
+        } else if (event.error === 'no-speech' || event.error === 'audio-capture') {
+          // Transient — will be restarted via onend; don't spam UI
+          isRecognitionRunningRef.current = false;
+        } else if (event.error === 'aborted') {
+          isRecognitionRunningRef.current = false;
         } else {
+          console.warn('Recognition error:', event.error);
           isRecognitionRunningRef.current = false;
         }
       };
@@ -370,6 +430,10 @@ export const VoiceProvider: React.FC<{
       recognition.onend = () => {
         isRecognitionRunningRef.current = false;
         recognitionRef.current = null;
+        if (silenceTimerRef.current) {
+          clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = null;
+        }
         // In continuous duplex mode, if unmuted and not speaking, re-launch recognition cleanly
         if (isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current) {
           setTimeout(() => {
@@ -378,7 +442,7 @@ export const VoiceProvider: React.FC<{
                 startRecognition();
               } catch {}
             }
-          }, 60);
+          }, 180);
         } else if (!isSpeakingRef.current) {
           setIsListening(false);
           setMicStatus('idle');
@@ -505,55 +569,159 @@ export const VoiceProvider: React.FC<{
     }, 150);
   }, [startRecognition]);
 
-  // Web Audio Stream setup for real-time mic volume metering
+  // Web Audio Stream setup — optimized for noise cancellation & accurate metering
   const startAudioMetering = useCallback(async () => {
     if (!navigator.mediaDevices?.getUserMedia) return null;
     try {
-      // Release any prior stream first
+      // Release any prior stream / context first (clean slate for device switch)
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+      }
       if (audioStreamRef.current) {
         audioStreamRef.current.getTracks().forEach(t => t.stop());
+        audioStreamRef.current = null;
       }
+      if (audioContextRef.current) {
+        try {
+          await audioContextRef.current.close();
+        } catch {}
+        audioContextRef.current = null;
+      }
+      sourceNodeRef.current = null;
+      filterNodeRef.current = null;
+      compressorRef.current = null;
+      analyserRef.current = null;
+      analyserTimeRef.current = null;
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-          sampleRate: 48000
-        }
-      });
+      // Chrome: advanced constraints dramatically improve recognition in noisy rooms.
+      // voiceIsolation (where supported) uses on-device ML to separate voice from background.
+      const baseConstraints: any = {
+        echoCancellation: { ideal: true },
+        noiseSuppression: { ideal: true },
+        autoGainControl: { ideal: true },
+        channelCount: { ideal: 1 },
+        sampleRate: { ideal: 48000 },
+        // goog* legacy keys still honoured by Chrome for stronger suppression
+        googEchoCancellation: { ideal: true },
+        googNoiseSuppression: { ideal: true },
+        googAutoGainControl: { ideal: true },
+        googHighpassFilter: { ideal: true },
+        // Newer Chrome: ML voice isolation
+        voiceIsolation: { ideal: true }
+      };
+
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: baseConstraints, video: false });
+      } catch (e: any) {
+        // Fallback for Firefox/Safari which reject unknown constraints
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1,
+            sampleRate: 48000
+          },
+          video: false
+        });
+      }
       audioStreamRef.current = stream;
 
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioContextClass) {
-        const ctx = new AudioContextClass();
+        const ctx = new AudioContextClass({
+          sampleRate: 48000,
+          latencyHint: 'interactive'
+        } as any);
         audioContextRef.current = ctx;
         if (ctx.state === 'suspended') {
-          await ctx.resume();
+          try {
+            await ctx.resume();
+          } catch {}
         }
         const source = ctx.createMediaStreamSource(stream);
+        sourceNodeRef.current = source;
+
+        // 1) High-pass filter: cuts HVAC rumble, desk thumps, plosives below ~85Hz
+        const hp = ctx.createBiquadFilter();
+        hp.type = 'highpass';
+        hp.frequency.value = 85;
+        hp.Q.value = 0.7;
+        filterNodeRef.current = hp;
+
+        // 2) Dynamics compressor: tames loud peaks, lifts quiet speech (soft knee)
+        const comp = ctx.createDynamicsCompressor();
+        comp.threshold.value = -24;
+        comp.knee.value = 30;
+        comp.ratio.value = 12;
+        comp.attack.value = 0.003;
+        comp.release.value = 0.25;
+        compressorRef.current = comp;
+
+        // 3a) Analyser for volume bar (frequency)
         const analyser = ctx.createAnalyser();
-        analyser.fftSize = 64;
-        analyser.smoothingTimeConstant = 0.3;
-        source.connect(analyser);
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.45;
         analyserRef.current = analyser;
 
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        // 3b) Analyser for time-domain RMS + VAD
+        const analyserTime = ctx.createAnalyser();
+        analyserTime.fftSize = 1024;
+        analyserTime.smoothingTimeConstant = 0.2;
+        analyserTimeRef.current = analyserTime;
+
+        // Chain: mic -> highpass -> compressor -> [analyser (freq), analyserTime]
+        source.connect(hp);
+        hp.connect(comp);
+        comp.connect(analyser);
+        comp.connect(analyserTime);
+        // Note: we do NOT connect to destination to avoid feedback.
+
+        const freqData = new Uint8Array(analyser.frequencyBinCount);
+        const timeData = new Uint8Array(analyserTime.fftSize);
+
+        let smoothLevel = 0;
 
         const updateVolume = () => {
-          if (!analyserRef.current || !isLiveKitConnectedRef.current || isMutedRef.current) {
+          if (!analyserRef.current || !analyserTimeRef.current || !isLiveKitConnectedRef.current || isMutedRef.current || isSpeakingRef.current) {
             setMicAudioLevel(0);
-          } else {
-            analyserRef.current.getByteFrequencyData(dataArray);
-            let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-              sum += dataArray[i];
-            }
-            const avg = sum / dataArray.length;
-            const normalized = Math.min(100, Math.round((avg / 128) * 100));
-            setMicAudioLevel(normalized);
+            animFrameRef.current = requestAnimationFrame(updateVolume);
+            return;
           }
+          // Frequency energy (for UI bar)
+          analyserRef.current.getByteFrequencyData(freqData);
+          let sum = 0;
+          // Weight mid frequencies (voice is 300-3400Hz ~ bins 2-18 at 256/48k)
+          for (let i = 2; i < Math.min(20, freqData.length); i++) sum += freqData[i] * 1.4;
+          for (let i = 20; i < freqData.length; i++) sum += freqData[i] * 0.5;
+          const avg = sum / freqData.length;
+          // Time-domain RMS for VAD + noise floor (more accurate for speech vs hum)
+          analyserTimeRef.current.getByteTimeDomainData(timeData);
+          let rmsSum = 0;
+          for (let i = 0; i < timeData.length; i++) {
+            const v = (timeData[i] - 128) / 128;
+            rmsSum += v * v;
+          }
+          const rms = Math.sqrt(rmsSum / timeData.length);
+          // Convert RMS to dB
+          const db = rms > 0 ? 20 * Math.log10(rms) : -100;
+          // Adaptive noise floor: track slowly when not speaking
+          const isProbablySpeech = rms > 0.04 && avg > 18;
+          if (isProbablySpeech) {
+            lastVoiceAtRef.current = Date.now();
+          } else {
+            // Slowly adapt floor toward current db when silent
+            noiseFloorRef.current = noiseFloorRef.current * 0.97 + db * 0.03;
+          }
+          // Gate: if far above noise floor, count as speech
+          const gate = isProbablySpeech || db > noiseFloorRef.current + 10;
+
+          // Smooth UI level with gate
+          const rawLevel = gate ? Math.min(100, Math.round((avg / 96) * 100)) : Math.min(100, Math.round((avg / 140) * 100 * 0.55));
+          smoothLevel = smoothLevel * 0.65 + rawLevel * 0.35;
+          setMicAudioLevel(Math.round(smoothLevel));
           animFrameRef.current = requestAnimationFrame(updateVolume);
         };
         animFrameRef.current = requestAnimationFrame(updateVolume);
@@ -561,6 +729,7 @@ export const VoiceProvider: React.FC<{
       return stream;
     } catch (err: any) {
       console.warn('Microphone stream initialization note:', err);
+      setMicErrorMessage(err?.name === 'NotAllowedError' ? 'Microphone permission denied. Allow mic access and reload.' : err?.message || 'Could not open microphone.');
       return null;
     }
   }, []);
@@ -570,6 +739,13 @@ export const VoiceProvider: React.FC<{
       cancelAnimationFrame(animFrameRef.current);
       animFrameRef.current = null;
     }
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    sourceNodeRef.current = null;
+    filterNodeRef.current = null;
+    compressorRef.current = null;
     if (audioStreamRef.current) {
       audioStreamRef.current.getTracks().forEach(t => t.stop());
       audioStreamRef.current = null;
@@ -581,6 +757,7 @@ export const VoiceProvider: React.FC<{
       audioContextRef.current = null;
     }
     analyserRef.current = null;
+    analyserTimeRef.current = null;
     setMicAudioLevel(0);
   }, []);
 
@@ -602,11 +779,31 @@ export const VoiceProvider: React.FC<{
         return;
       }
 
-      const room = new Room({ adaptiveStream: true, dynacast: true });
+      const room = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+        // Use same noise-suppressing defaults as our metering stream so LiveKit doesn't fight SpeechRecognition
+        audioCaptureDefaults: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: 48000
+        } as any
+      });
       const countParticipants = () => setLivekitParticipants(room.remoteParticipants.size + 1);
+      const applyLiveKitMic = () => {
+        // Only publish mic when someone else is in the room — otherwise the extra capture competes with speech recognition
+        const shouldEnable = !isMutedRef.current && room.remoteParticipants.size > 0;
+        room.localParticipant.setMicrophoneEnabled(shouldEnable).catch(() => {});
+      };
+      const onParticipantsChanged = () => {
+        countParticipants();
+        applyLiveKitMic();
+      };
 
-      room.on(RoomEvent.ParticipantConnected, countParticipants);
-      room.on(RoomEvent.ParticipantDisconnected, countParticipants);
+      room.on(RoomEvent.ParticipantConnected, onParticipantsChanged);
+      room.on(RoomEvent.ParticipantDisconnected, onParticipantsChanged);
       room.on(RoomEvent.Disconnected, () => {
         roomRef.current = null;
         setLivekitStatus('idle');
@@ -658,9 +855,9 @@ export const VoiceProvider: React.FC<{
       countParticipants();
       setLivekitStatus('connected');
 
-      // Publish the microphone into the room. If the browser blocks it we stay connected data-only.
+      // Publish the microphone into the room only if someone else is there. Otherwise stay data-only to avoid mic contention.
       try {
-        await room.localParticipant.setMicrophoneEnabled(!isMutedRef.current);
+        await room.localParticipant.setMicrophoneEnabled(!isMutedRef.current && room.remoteParticipants.size > 0);
       } catch (micErr: any) {
         setLivekitDetail('Connected, but microphone could not be published: ' + (micErr?.message || 'permission denied'));
       }
@@ -688,7 +885,10 @@ export const VoiceProvider: React.FC<{
   }, []);
 
   const syncLiveKitMic = useCallback((muted: boolean) => {
-    roomRef.current?.localParticipant.setMicrophoneEnabled(!muted).catch(() => {});
+    const room = roomRef.current;
+    if (!room) return;
+    const shouldEnable = !muted && room.remoteParticipants.size > 0;
+    room.localParticipant.setMicrophoneEnabled(shouldEnable).catch(() => {});
   }, []);
 
   const publishTurn = useCallback((turn: Record<string, unknown>) => {
@@ -744,10 +944,12 @@ export const VoiceProvider: React.FC<{
     const unlockAudio = () => {
       if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
         try {
-          audioContextRef.current.resume();
+          audioContextRef.current.resume().then(() => setMicErrorMessage(null)).catch(() => {});
         } catch {}
+      } else if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        try { audioContextRef.current.resume(); } catch {}
       }
-      if (!isRecognitionRunningRef.current && isLiveKitConnectedRef.current && !isMutedRef.current) {
+      if (!isRecognitionRunningRef.current && isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current) {
         startRecognition();
       }
     };
