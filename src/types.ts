@@ -59,7 +59,7 @@ export interface SimulationResult {
 
 export interface MossDocument {
   id: string;
-  category: 'hardware' | 'runbook' | 'guardrail' | 'incident' | 'telemetry';
+  category: 'hardware' | 'runbook' | 'guardrail' | 'incident' | 'telemetry' | 'reference';
   title: string;
   summary: string;
   content: string;
@@ -81,8 +81,17 @@ export interface MossSearchResult {
 export interface MossSearchResponse {
   query: string;
   results: MossSearchResult[];
+  /** Retrieval time reported by the backend (Moss SDK timeTakenInMs when available). */
   latencyMs: number;
   latencyMicroseconds: number;
+  /** Wall-clock time measured by the server around the call. */
+  wallClockMs?: number;
+  /** Which backend actually served the query. */
+  backend?: 'moss' | 'local';
+  /** Local-embeddings mode only: query embedding time and Moss search time (latencyMs is their sum). */
+  embedMs?: number;
+  searchMs?: number;
+  mode?: 'in-process' | 'cloud' | 'local';
   retrievalEngine: string;
   sub10msGuaranteed: boolean;
   totalDocsIndexed: number;
@@ -93,7 +102,7 @@ export interface VoiceAgentResponse {
   id: string;
   transcript: string;
   spokenReply: string;
-  intent: 'start_sim' | 'pause_sim' | 'reset_sim' | 'diagnose' | 'preramp' | 'workload_burst' | 'decrease_workload' | 'rebalance' | 'query_specs' | 'switch_mode' | 'runbook' | 'emergency' | 'help' | 'general';
+  intent: 'start_sim' | 'pause_sim' | 'reset_sim' | 'diagnose' | 'preramp' | 'workload_burst' | 'decrease_workload' | 'rebalance' | 'query_specs' | 'switch_mode' | 'runbook' | 'knowledge' | 'emergency' | 'help' | 'general';
   actionTaken?: string;
   mossRetrieval: MossSearchResponse;
   simulationImpact?: {
@@ -109,6 +118,8 @@ export interface VoiceAgentResponse {
     latencyMs: number;
     voiceState: 'ready' | 'streaming' | 'speaking';
   };
+  answeredBy?: 'rules' | 'llm';
+  timings?: { retrievalMs: number; serverMs: number; llmMs?: number };
   timestamp: string;
 }
 
@@ -133,6 +144,13 @@ export interface VoiceMessage {
   text: string;
   timestamp: string;
   mossLatency?: number;
+  /** Which retrieval backend served this reply ('moss' or 'local' fallback). */
+  mossBackend?: 'moss' | 'local';
+  /** 'llm' when an LLM phrased the answer from Moss documents, otherwise deterministic rules. */
+  answeredBy?: 'rules' | 'llm';
+  llmMs?: number;
+  /** Set for messages that arrived from another participant in the LiveKit room. */
+  via?: string;
   retrievedDocs?: string[];
   actionTaken?: string;
   simulationImpact?: {

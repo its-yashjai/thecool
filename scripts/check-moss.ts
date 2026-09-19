@@ -1,23 +1,20 @@
 /**
- * Moss benchmark/check script
- * Uses the existing MossEngine abstraction to measure real latency
- * Reports which backend serves each query (in-process / cloud / local)
- * Does NOT create or recreate any Moss index
+ * Moss health check + benchmark.
+ *
+ *   npm run check:moss
+ *
+ * 1. Loads credentials from .env.local / .env
+ * 2. Creates or syncs the Moss index from server/knowledge.ts
+ * 3. Tries to load it in-process (fastest path); falls back to Moss Cloud queries; then to local keywords
+ * 4. Runs 60 realistic voice questions and prints p50 / p95 latency
+ * 5. Saves bench/moss-results.json (cite this file in your submission)
  */
-
 import dotenv from 'dotenv';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-
 dotenv.config({ path: '.env.local' });
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const ROOT = join(__dirname, '..');
-
-import { MossEngine } from '../server/moss.js';
+import { Retriever } from '../server/retrieval.js';
 
 const QUESTIONS = [
   'what are the H100 specs',
@@ -37,85 +34,59 @@ const QUESTIONS = [
   'tell me about the B200',
 ];
 
-function pct(arr: number[], p: number): number {
-  const sorted = [...arr].sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
-  return sorted[idx];
-}
+const pct = (a: number[], p: number) => {
+  const s = [...a].sort((x, y) => x - y);
+  return s[Math.min(s.length - 1, Math.ceil((p / 100) * s.length) - 1)];
+};
 
-async function main() {
-  const engine = new MossEngine();
+const r = new Retriever();
+console.log(`Moss configured: ${r.configured}  index: ${r.indexName}`);
+console.log('Initialising (first run creates the index, this can take a little while)...');
+await r.init();
 
-  console.log('Initialising MossEngine (loads existing index if available)...');
-  await engine.initialize();
+const st = r.status();
+console.log(`\nState: ${st.state}   Mode: ${st.mode}`);
+if (st.error) console.log(`Note: ${st.error}`);
 
-  const mode = engine.getSdkMode();
-  const isReadyVal = engine.isSdkReady();
-  console.log(`\nMoss mode: ${mode}  isSdkReady: ${isReadyVal}`);
-
-  const wallTimes: number[] = [];
-  const reportedTimes: number[] = [];
-  let sampleResult: string | null = null;
-
-  console.log('\nRunning 60 queries (4 rounds × 15 questions)...\n');
-
-  for (let round = 0; round < 4; round++) {
-    for (const q of QUESTIONS) {
-      const t0 = process.hrtime.bigint();
-      const res = await engine.search(q, 3);
-      const wallMs = Number(process.hrtime.bigint() - t0) / 1_000_000;
-
-      wallTimes.push(wallMs);
-      reportedTimes.push(res.latencyMs);
-
-      if (round === 0 && !sampleResult) {
-        const top = res.results[0]?.document.id ?? '(no match)';
-        sampleResult = `"${q}" -> ${top} via ${res.retrievalEngine} (wall: ${wallMs.toFixed(2)}ms, reported: ${res.latencyMs}ms)`;
-      }
-    }
+const wall: number[] = [];
+const reported: number[] = [];
+let sample = '';
+const byMode: Record<string, number> = {};
+const embedTimes: number[] = [];
+for (let round = 0; round < 4; round++) {
+  for (const q of QUESTIONS) {
+    const t0 = performance.now();
+    const res = await r.search(q, 3);
+    wall.push(performance.now() - t0);
+    reported.push(res.latencyMs);
+    byMode[res.mode] = (byMode[res.mode] ?? 0) + 1;
+    if (res.embedMs !== undefined) embedTimes.push(res.embedMs);
+    if (round === 0 && !sample) sample = `"${q}" -> ${res.results[0]?.document.id ?? '(no match)'} via ${res.retrievalEngine}`;
   }
-
-  const result = {
-    when: new Date().toISOString(),
-    mossMode: mode,
-    isSdkReady: isReadyVal,
-    indexName: 'neuralflow-ops-v1',
-    docs: engine.getAllDocuments().length,
-    queries: wallTimes.length,
-    wallClockMs: {
-      p50: +pct(wallTimes, 50).toFixed(2),
-      p95: +pct(wallTimes, 95).toFixed(2),
-      p99: +pct(wallTimes, 99).toFixed(2),
-      max: +Math.max(...wallTimes).toFixed(2),
-      min: +Math.min(...wallTimes).toFixed(2),
-    },
-    reportedMs: {
-      p50: +pct(reportedTimes, 50).toFixed(2),
-      p95: +pct(reportedTimes, 95).toFixed(2),
-      p99: +pct(reportedTimes, 99).toFixed(2),
-      max: +Math.max(...reportedTimes).toFixed(2),
-    },
-    sample: sampleResult,
-    backendBreakdown: {
-      real: mode === 'real' ? wallTimes.length : 0,
-      localFallback: mode === 'local-fallback' ? wallTimes.length : 0,
-    },
-  };
-
-  console.log('Sample:', sampleResult);
-  console.log('\n=== RESULTS ===');
-  console.log(JSON.stringify(result, null, 2));
-
-  mkdirSync(join(ROOT, 'bench'), { recursive: true });
-  writeFileSync(join(ROOT, 'bench', 'moss-results.json'), JSON.stringify(result, null, 2));
-  console.log('\nSaved bench/moss-results.json');
-
-  console.log(`\nBackend: ${mode === 'real' ? 'Moss SDK (in-process)' : 'Local keyword fallback'}`);
-  console.log(`Wall-clock p50: ${result.wallClockMs.p50}ms  p95: ${result.wallClockMs.p95}ms  p99: ${result.wallClockMs.p99}ms`);
-  console.log(`Reported  p50: ${result.reportedMs.p50}ms  p95: ${result.reportedMs.p95}ms  p99: ${result.reportedMs.p99}ms`);
 }
+console.log(`\nSample: ${sample}`);
+const out = {
+  when: new Date().toISOString(),
+  mode: st.mode,
+  backend: st.activeBackend,
+  index: r.indexName,
+  docs: st.docCount,
+  queries: wall.length,
+  perQueryBackend: byMode,
+  embeddings: st.embeddings,
+  embedMs: embedTimes.length ? { p50: +pct(embedTimes, 50).toFixed(2), p95: +pct(embedTimes, 95).toFixed(2) } : null,
+  wallClockMs: { p50: +pct(wall, 50).toFixed(2), p95: +pct(wall, 95).toFixed(2), max: +Math.max(...wall).toFixed(2) },
+  reportedMs: { p50: +pct(reported, 50).toFixed(2), p95: +pct(reported, 95).toFixed(2) },
+  note: st.error ?? null,
+};
+console.log(out);
+mkdirSync('bench', { recursive: true });
+writeFileSync('bench/moss-results.json', JSON.stringify(out, null, 2));
+console.log('\nSaved bench/moss-results.json');
 
-main().catch((err) => {
-  console.error('Error:', err);
-  process.exit(1);
-});
+if (st.mode === 'in-process') console.log('\nRESULT: Moss is running in-process. Under-10ms path is live.');
+else if (st.mode === 'cloud') console.log('\nRESULT: Moss works over the network only (in-process model load failed). See the note above.');
+else console.log('\nRESULT: Moss is NOT active. The app will use the local keyword fallback.');
+
+await r.close();
+process.exit(st.mode === 'local' ? 1 : 0);

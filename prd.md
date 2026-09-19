@@ -26,7 +26,7 @@
 
 ## 1. Project Overview
 
-**NeuralFlow** is a Physics-Informed Forecaster that replaces reactive PID cooling controllers in GPU data centers with a proactive, predictive system. It forecasts GPU heat spikes 30–60 seconds ahead by learning from both data and the fundamental laws of thermodynamics.
+**NeuralFlow** is a Physics-Informed Neural Network (PINN) that replaces reactive PID cooling controllers in GPU data centers with a proactive, predictive system. It forecasts GPU heat spikes 30–60 seconds ahead by learning from both data and the fundamental laws of thermodynamics.
 
 Scoped as a full software simulation — no physical hardware required. Runs entirely on a standard laptop (16GB RAM, no dedicated GPU needed).
 
@@ -71,7 +71,7 @@ GPU heats up → sensor detects spike → PID reacts → fans ramp up → thrott
 ### NeuralFlow flow (proactive)
 
 ```
-Power draw rises → Physics-Informed Forecaster predicts spike 30–60s ahead → fans pre-ramp → temp stays safe → zero throttle
+Power draw rises → PINN predicts spike 30–60s ahead → fans pre-ramp → temp stays safe → zero throttle
 ```
 
 ---
@@ -81,7 +81,7 @@ Power draw rises → Physics-Informed Forecaster predicts spike 30–60s ahead �
 ### Primary goals
 
 - [ ] Build a physics-based GPU thermal simulator (digital twin)
-- [ ] Train a Physics-Informed Forecaster that predicts GPU temperature 30–60 seconds ahead with <2°C error
+- [ ] Train a PINN that predicts GPU temperature 30–60 seconds ahead with <2°C error
 - [ ] Implement a PID baseline controller for comparison
 - [ ] Demonstrate measurable energy savings in simulation
 - [ ] Build an interactive dashboard for live demo
@@ -158,7 +158,7 @@ class GPUThermalSimulator:
 
 ---
 
-## 6. Phase 2 — Physics-Informed Forecaster Model (Week 3–5)
+## 6. Phase 2 — PINN Model (Week 3–5)
 
 > **Goal:** Train a neural network that predicts future temperature AND respects physics.
 
@@ -217,7 +217,7 @@ Dashboard displays: **"Predicted temp: 74°C ± 2°C"**
 
 ## 7. Phase 3 — Controller & Comparison (Week 5–6)
 
-> **Goal:** Show that Physics-Informed Forecaster-based control outperforms PID in simulation.
+> **Goal:** Show that PINN-based control outperforms PID in simulation.
 
 ### PID controller (baseline)
 
@@ -243,8 +243,8 @@ class PIDController:
 ```python
 # neuralflow_controller.py
 class NeuralFlowController:
-    def __init__(self, forecaster_model, threshold=80.0):
-        self.model = forecaster_model
+    def __init__(self, pinn_model, threshold=80.0):
+        self.model = pinn_model
         self.threshold = threshold
         self.window = deque(maxlen=30)
 
@@ -255,7 +255,6 @@ class NeuralFlowController:
         headroom = self.threshold - pred_temp.max()
         fan_speed = 100 - (headroom / self.threshold) * 70
         return max(20, min(100, fan_speed.item()))
-```
 ```
 
 ### Comparison results
@@ -383,7 +382,7 @@ Result:  faster convergence, better generalization
 | Layer | Tool | Purpose |
 |---|---|---|
 | Language | Python 3.10+ | Everything |
-| Neural network | PyTorch 2.x | Physics-Informed Forecaster + LSTM |
+| Neural network | PyTorch 2.x | PINN + LSTM |
 | Physics / ODE | SciPy `solve_ivp` | Accurate numerical integration |
 | Data | NumPy + Pandas | Time-series handling |
 | Dashboard | Streamlit | Browser app in pure Python |
@@ -424,7 +423,7 @@ neuralflow/
 │
 ├── controllers/
 │   ├── pid_controller.py         # Baseline PID
-│   └── neuralflow_controller.py  # Physics-Informed Forecaster proactive controller
+│   └── neuralflow_controller.py  # PINN-based proactive controller
 │
 ├── simulator.py                  # GPU digital twin (physics ODE)
 ├── train.py                      # Training script
@@ -514,19 +513,19 @@ Additional benefits: reduced throttling → same compute in fewer GPU-hours → 
 |                  NeuralFlow Real-Time Voice Dispatcher                  |
 |                                                                         |
 |  • Speech Intent Recognition & Conversational Synthesis                 |
-|  • Sub-10ms Context Injection via Moss Engine                           |
+|  • Context Injection via Moss (latency measured per query)                           |
 |  • Proactive Runbook Automation & Physics Horizon Interlock             |
 +-------------------------------------------------------------------------+
         │                                                    │
         │ (2) Query (< 1.0ms)                                │ (4) Control Action
         ▼                                                    ▼
 +------------------------------------+   +--------------------------------+
-|     Moss Zero-Vector-DB Engine     |   |    Physics-Informed Forecaster Digital Twin Engine    |
+|     Moss Retrieval Layer     |   |    PINN Digital Twin Engine    |
 |                                    |   |                                |
 | • Hardware Specs (H100, B200)      |   | • 30-60s Predictive Horizon    |
 | • Incident Runbooks (RB-01..RB-05) |   | • Runge-Kutta 4th-Order ODE    |
 | • Operational Guardrails (< 85°C)  |   | • 3x3 Cluster Thermal Matrix   |
-| • Latency: Sub-10ms Guaranteed     |   | • Pre-ramping & Fan Modulation |
+| • Latency: measured per query     |   | • Pre-ramping & Fan Modulation |
 +------------------------------------+   +--------------------------------+
                                     │
                                     │ (3) Synthesized Voice Reply (< 500ms total)
@@ -535,6 +534,12 @@ Additional benefits: reduced throttling → same compute in fewer GPU-hours → 
 |          LiveKit Audio Visualizer & Mission Control Dashboard           |
 +-------------------------------------------------------------------------+
 ```
+
+### Moss Integration Benchmark Results
+- **Retrieval Engine**: Moss SDK (in-process index when available, Moss Cloud otherwise) with a labeled local keyword fallback
+- **Measured Retrieval Latency**: see `bench/moss-results.json` (generated by `npm run check:moss`) and the live inspector in the Voice Ops console
+- **Vector DB Dependency**: 0 (No external Pinecone, Qdrant, or Chroma network hops)
+- **End-to-End Voice Turnaround**: shown per turn in the console (browser round trip, server time, retrieval time); not a fixed claim
 
 ---
 

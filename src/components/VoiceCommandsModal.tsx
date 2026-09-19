@@ -454,7 +454,7 @@ export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
                       </div>
 
                       <div className="flex items-center justify-between pt-2 border-t border-white/5">
-                        <span className="text-[10px] text-zinc-500 font-mono">Sub-10ms Moss</span>
+                        <span className="text-[10px] text-zinc-500 font-mono">Moss retrieval</span>
                         <button
                           onClick={() => handleTestCommand(cmd.actionKey)}
                           disabled={isProcessing}
@@ -531,7 +531,7 @@ export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
         <div className="px-5 py-3 border-t border-sky-500/20 bg-[#0c0c24] flex items-center justify-between text-xs text-zinc-400">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400" />
-            <span>Moss Engine: Sub-10ms Context Retrieval Active</span>
+            <span>Moss: real-time context retrieval</span>
           </div>
           <button
             onClick={onClose}

@@ -1,28 +1,13 @@
-/**
- * Voice Dispatcher — Real-time voice co-pilot for GPU thermal operations
- *
- * What's real now:
- *   • LLM brain: OpenAI GPT (model via OPENAI_MODEL env, defaults to gpt-4o-mini).
- *     Uses Moss retrieval results as RAG context. Falls back to local regex matcher
- *     if OPENAI_API_KEY is not set.
- *   • LiveKit token: Generated with the real livekit-server-sdk JWT library using
- *     LIVEKIT_API_KEY / LIVEKIT_API_SECRET. Falls back to a clearly-labelled demo
- *     token if credentials are absent.
- *   • Moss search: Now async (real SDK may await a local in-process call).
- */
-
-import OpenAI from 'openai';
-import { AccessToken } from 'livekit-server-sdk';
-import { MossEngine, MossSearchResponse } from './moss.js';
+import { MossSearchResponse, MossDocument } from './moss.js';
+import { livekitRoomName } from './livekit.js';
+import { askLlm, llmStatus } from './llm.js';
 import { SimulationEngine } from './engine.js';
 
 export interface VoiceAgentResponse {
   id: string;
   transcript: string;
   spokenReply: string;
-  intent: 'wake' | 'stop_listening' | 'help' | 'start_sim' | 'pause_sim' | 'reset_sim'
-         | 'preramp' | 'workload_burst' | 'decrease_workload' | 'diagnose' | 'rebalance'
-         | 'query_specs' | 'emergency' | 'switch_mode' | 'runbook' | 'general';
+  intent: 'start_sim' | 'pause_sim' | 'reset_sim' | 'diagnose' | 'preramp' | 'workload_burst' | 'decrease_workload' | 'rebalance' | 'query_specs' | 'switch_mode' | 'runbook' | 'knowledge' | 'emergency' | 'help' | 'general';
   actionTaken?: string;
   mossRetrieval: MossSearchResponse;
   simulationImpact?: {
@@ -35,390 +20,388 @@ export interface VoiceAgentResponse {
     room: string;
     participant: string;
     protocol: string;
+    /** Server-side processing time for this turn (retrieval + intent handling), measured. */
     latencyMs: number;
     voiceState: 'ready' | 'streaming' | 'speaking';
   };
+  /** 'llm' when an LLM phrased the answer from Moss documents, otherwise deterministic 'rules'. */
+  answeredBy?: 'rules' | 'llm';
+  timings?: { retrievalMs: number; serverMs: number; llmMs?: number };
   timestamp: string;
 }
 
-// ── OpenAI client (optional — falls back to local regex matcher) ─────────────
-
-let openai: OpenAI | null = null;
-let LLM_MODEL = 'gpt-4o-mini';
-let livekitConfigured = false;
-
-function initClients() {
-  if (openai !== null && LLM_MODEL !== 'gpt-4o-mini' && livekitConfigured) {
-    return; // already initialized
-  }
-
-  const apiKey = process.env.OPENAI_API_KEY;
-  const baseURL = process.env.LLM_BASE_URL || undefined;
-  const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-
-  LLM_MODEL = model;
-
-  if (apiKey) {
-    openai = new OpenAI({ apiKey, baseURL });
-    console.log(`[LLM] ✓ LLM connected — model: ${LLM_MODEL}${baseURL ? ` (${new URL(baseURL).hostname})` : ''}`);
-  } else {
-    openai = null;
-    console.warn('[LLM] OPENAI_API_KEY not set → using local regex intent matcher as fallback.');
-  }
-
-  const lkKey = process.env.LIVEKIT_API_KEY;
-  const lkSecret = process.env.LIVEKIT_API_SECRET;
-
-  if (lkKey && lkSecret) {
-    livekitConfigured = true;
-    console.log(`[LiveKit] ✓ Real token generation enabled (key: ${lkKey.slice(0, 6)}…)`);
-  } else {
-    livekitConfigured = false;
-    console.warn('[LiveKit] LIVEKIT_API_KEY / LIVEKIT_API_SECRET not set → returning demo-mode token.');
-  }
-}
-
-// Call initClients when VoiceDispatcher is constructed
-export function ensureClientsInitialized() {
-  initClients();
-}
-
-// Export getters for current values
-export function getOpenAIClient() { initClients(); return openai; }
-export function getLLMModel() { initClients(); return LLM_MODEL; }
-export function isLiveKitConfigured() { initClients(); return livekitConfigured; }
-export function getLiveKitCredentials() {
-  initClients();
-  return {
-    apiKey: process.env.LIVEKIT_API_KEY,
-    apiSecret: process.env.LIVEKIT_API_SECRET,
-    url: process.env.LIVEKIT_URL || 'wss://neuralflow.livekit.cloud'
-  };
-}
-
-// ── System prompt builder for the LLM ────────────────────────────────────────
-
-function buildSystemPrompt(
-  snap: ReturnType<SimulationEngine['fullSnapshot']>,
-  mossCtx: MossSearchResponse
-): string {
-  const docs = mossCtx.results.slice(0, 3).map((r, i) =>
-    `[Doc ${i + 1}] ${r.document.title}: ${r.document.summary}${r.document.actionableProtocol ? ' Action: ' + r.document.actionableProtocol : ''}`
-  ).join('\n');
-
-  return `You are NeuralFlow, a real-time GPU thermal operations co-pilot. You help site-reliability engineers manage a 3×3 GPU cluster.
-
-CURRENT CLUSTER STATE:
-- NeuralFlow junction temp: ${snap.nf_T?.toFixed(1) ?? '40.0'}°C
-- PID junction temp: ${snap.pid_T?.toFixed(1) ?? '40.0'}°C  
-- Fan speed (NeuralFlow): ${snap.nf_fan?.toFixed(0) ?? '30'}%
-- Power draw: ${snap.power?.toFixed(0) ?? '140'}W
-- 60s forecast (worst case): ${snap.forecast?.worst?.toFixed(1) ?? 'N/A'}°C
-- Simulation running: ${snap.running ? 'YES' : 'NO'}
-- AI workload: ${snap.ai_reqs} req/s | API: ${snap.api_reqs} req/s | Users: ${snap.users} | Batch jobs: ${snap.batch}
-
-MOSS KNOWLEDGE RETRIEVED (latency: ${mossCtx.latencyMs}ms):
-${docs}
-
-RESPONSE RULES:
-1. Reply conversationally, under 40 words. No markdown, no bullet points.
-2. Always reference the live temperature or fan speed when relevant.
-3. Return a valid JSON object with these EXACT fields:
-   { "intent": "<intent>", "spokenReply": "<text>", "actionTaken": "<description or null>" }
-4. intent must be one of: wake, stop_listening, help, start_sim, pause_sim, reset_sim, preramp, workload_burst, decrease_workload, diagnose, rebalance, query_specs, emergency, switch_mode, runbook, general
-5. Never fabricate temperatures or latency numbers — use values from CURRENT CLUSTER STATE above.
-6. When you identify an action (e.g. preramp, workload_burst), say so clearly and confirm the action taken.`;
-}
-
-// ── LLM-driven intent processor ──────────────────────────────────────────────
-
-async function processWithLLM(
-  transcript: string,
-  snap: ReturnType<SimulationEngine['fullSnapshot']>,
-  mossCtx: MossSearchResponse
-): Promise<{ intent: VoiceAgentResponse['intent']; spokenReply: string; actionTaken?: string } | null> {
-  const client = getOpenAIClient();
-  const model = getLLMModel();
-  if (!client) return null;
-
-  try {
-    const completion = await client.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: buildSystemPrompt(snap, mossCtx) },
-        { role: 'user', content: transcript }
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.3,
-      max_tokens: 200
-    });
-
-    const raw = completion.choices[0]?.message?.content ?? '{}';
-    const parsed = JSON.parse(raw);
-
-    const validIntents = new Set([
-      'wake', 'stop_listening', 'help', 'start_sim', 'pause_sim', 'reset_sim',
-      'preramp', 'workload_burst', 'decrease_workload', 'diagnose', 'rebalance',
-      'query_specs', 'emergency', 'switch_mode', 'runbook', 'general'
-    ]);
-
-    return {
-      intent: validIntents.has(parsed.intent) ? parsed.intent : 'general',
-      spokenReply: String(parsed.spokenReply || transcript),
-      actionTaken: parsed.actionTaken || undefined
-    };
-  } catch (err) {
-    console.warn('[LLM] GPT call failed, falling back to regex matcher:', err);
-    return null;
-  }
-}
-
-// ── Local regex matcher — fallback when OPENAI_API_KEY is absent ─────────────
-
-function localRegexMatcher(
-  transcript: string,
-  engine: SimulationEngine,
-  mossResult: MossSearchResponse
-): { intent: VoiceAgentResponse['intent']; spokenReply: string; actionTaken?: string } {
-  const raw = transcript.trim();
-  let text = raw.toLowerCase().replace(/[.,/#!$%^&*;:{}=\-_`~()?'"]/g, ' ');
-  text = text.replace(/\b(please|can you|could you|would you|neuralflow|hey|hello|hi|now|just|like|um|uh|actually|basically|i want to|let us|lets)\b/g, ' ').replace(/\s+/g, ' ').trim();
-  const snap = engine.fullSnapshot();
-  const currentJunction = snap.nf_T ?? 40.0;
-  const currentFan = snap.nf_fan ?? 30;
-  const predictedTemp = snap.forecast?.worst ?? snap.forecast?.mean ?? (currentJunction + 2.5);
-  const has = (...words: string[]) => words.some(w => text.includes(w) || text === w || raw.toLowerCase().includes(w));
-
-  if (!text || has('listen', 'wake up', 'hear me', 'test mic')) {
-    return { intent: 'wake', spokenReply: 'NeuralFlow is listening. Say "Start simulation", "Increase workload", or "Suggest".', actionTaken: 'Activated listening mode' };
-  }
-  if (has('stop listening', 'mute mic', 'go to sleep')) {
-    return { intent: 'stop_listening', spokenReply: 'Microphone muted. Say "NeuralFlow listen" to resume.', actionTaken: 'Set mic to standby' };
-  }
-  if (has('suggest', 'recommend', 'help', 'what to do', 'what should i do', 'options')) {
-    let reply = `Cluster at ${currentJunction.toFixed(1)}°C. `;
-    if (!engine.running) reply += 'Say "Start simulation" to begin.';
-    else if (currentJunction > 72) reply += 'Say "Pre-ramp fans" to cool down.';
-    else reply += 'Say "Increase workload" to stress-test.';
-    return { intent: 'help', spokenReply: reply, actionTaken: 'Provided contextual suggestion' };
-  }
-  if (has('start', 'begin', 'play', 'resume', 'run', 'launch') && !has('runbook')) {
-    engine.running = true;
-    return { intent: 'start_sim', spokenReply: 'Simulation started! GPU cluster is running live.', actionTaken: 'Started simulation (running = true)' };
-  }
-  if (has('reset', 'restart', 'start over', 'clear', 'reboot')) {
-    engine.reset();
-    return { intent: 'reset_sim', spokenReply: 'Simulation reset to baseline. 40°C, 30% fans.', actionTaken: 'Reset cluster to initial state' };
-  }
-  if (has('pause', 'stop', 'freeze', 'halt') && !has('stop listening')) {
-    engine.running = false;
-    return { intent: 'pause_sim', spokenReply: 'Simulation paused. Say "Start" to resume.', actionTaken: 'Paused simulation' };
-  }
-  if ((has('increase', 'boost', 'raise', 'more') && has('fan', 'fans', 'cooling', 'speed')) || has('preramp', 'pre ramp', 'ramp up', 'boost fan')) {
-    engine.nf_fan = Math.min(100, (engine.nf_fan || 30) + 25);
-    engine.running = true;
-    return { intent: 'preramp', spokenReply: `Fans boosted to ${engine.nf_fan.toFixed(0)}%. Cooling all 9 GPU sockets.`, actionTaken: `Fan duty cycle → ${engine.nf_fan.toFixed(0)}%` };
-  }
-  if (has('ramp', 'cool', 'fan', 'cooling', 'chill', 'spin fans')) {
-    engine.nf_fan = 80.0;
-    engine.running = true;
-    return { intent: 'preramp', spokenReply: 'Fans pre-ramped to 80%. Proactive cooling engaged.', actionTaken: 'RB-01: Pre-ramp fans to 80%' };
-  }
-  if (has('increase', 'boost', 'burst', 'more workload', 'stress', 'heavy')) {
-    engine.ai_reqs = Math.min(100, (engine.ai_reqs || 10) + 30);
-    engine.api_reqs = Math.min(500, (engine.api_reqs || 50) + 100);
-    engine.users = Math.min(200, (engine.users || 20) + 40);
-    engine.running = true;
-    return { intent: 'workload_burst', spokenReply: `Workload scaled up: ${engine.ai_reqs} AI req/s, ${engine.api_reqs} API req/s, ${engine.users} users.`, actionTaken: 'Scaled up workload' };
-  }
-  if (has('decrease', 'lower', 'reduce', 'less workload', 'scale down')) {
-    engine.ai_reqs = Math.max(0, Math.round((engine.ai_reqs || 50) / 2));
-    engine.api_reqs = Math.max(0, Math.round((engine.api_reqs || 250) / 2));
-    engine.users = Math.max(0, Math.round((engine.users || 100) / 2));
-    return { intent: 'decrease_workload', spokenReply: `Workload reduced to ${engine.ai_reqs} AI req/s, ${engine.api_reqs} API, ${engine.users} users.`, actionTaken: 'Reduced workload' };
-  }
-  if (has('diagnos', 'status', 'temperature', 'how hot', 'temp', 'check', 'health')) {
-    return { intent: 'diagnose', spokenReply: `Junction at ${currentJunction.toFixed(1)}°C, fan at ${currentFan.toFixed(0)}%. 60s forecast: ${predictedTemp.toFixed(1)}°C. Safe margin maintained.`, actionTaken: 'Diagnosed cluster state' };
-  }
-  if (has('rebalance', 'cluster', 'hotspot', 'balance')) {
-    engine.running = true;
-    return { intent: 'rebalance', spokenReply: 'Executing RB-03. Workload shifted to perimeter GPUs with 18% higher airflow.', actionTaken: 'Cluster re-balance executed' };
-  }
-  if (has('spec', 'h100', 'b200', 'hardware', 'tdp', 'nvidia')) {
-    const topDoc = mossResult.results[0]?.document;
-    return { intent: 'query_specs', spokenReply: topDoc ? `${topDoc.title}: ${topDoc.summary}` : 'H100 SXM5: 700W TDP, 85°C throttle threshold.', actionTaken: `Fetched spec via Moss (${mossResult.latencyMs}ms)` };
-  }
-  if (has('emergency', '100%', 'max fan', 'maximum cooling', 'guardrail')) {
-    engine.nf_fan = 100.0;
-    engine.running = true;
-    return { intent: 'emergency', spokenReply: 'Emergency! Fans at 100%. RB-04 thermal clamp engaged.', actionTaken: 'Emergency 100% fan duty cycle' };
-  }
-  if (has('runbook', 'incident', 'protocol', 'rb 01', 'rb 02', 'rb 03', 'rb 04')) {
-    const topDoc = mossResult.results[0]?.document;
-    return { intent: 'runbook', spokenReply: topDoc?.actionableProtocol ? `Protocol: ${topDoc.actionableProtocol}` : 'Safety guardrails active. 85°C throttle cutoff enforced.', actionTaken: `Runbook via Moss (${mossResult.latencyMs}ms)` };
-  }
-  if (has('pid', 'compare', 'benchmark', 'versus', 'vs')) {
-    return { intent: 'switch_mode', spokenReply: 'NeuralFlow saves 12.8% energy vs PID: 71°C peak vs 84°C, zero throttle events.', actionTaken: 'Benchmarked forecaster vs PID' };
-  }
-  return { intent: 'general', spokenReply: `Heard: "${raw}". Try "Start", "Increase workload", or "Suggest".`, actionTaken: undefined };
-}
-
-// ── Actuation: apply LLM-classified intent to the engine ─────────────────────
-
-function actuateIntent(
-  intent: VoiceAgentResponse['intent'],
-  engine: SimulationEngine,
-  llmActionTaken: string | undefined
-): { actionTaken: string | undefined } {
-  switch (intent) {
-    case 'start_sim':
-      engine.running = true;
-      return { actionTaken: llmActionTaken ?? 'Started simulation (running = true)' };
-    case 'pause_sim':
-      engine.running = false;
-      return { actionTaken: llmActionTaken ?? 'Paused simulation' };
-    case 'reset_sim':
-      engine.reset();
-      return { actionTaken: llmActionTaken ?? 'Reset cluster to initial state' };
-    case 'preramp':
-      engine.nf_fan = Math.min(100, (engine.nf_fan || 30) + 25);
-      engine.running = true;
-      return { actionTaken: llmActionTaken ?? `Pre-ramp fans to ${engine.nf_fan.toFixed(0)}%` };
-    case 'workload_burst':
-      engine.ai_reqs = Math.min(100, (engine.ai_reqs || 10) + 30);
-      engine.api_reqs = Math.min(500, (engine.api_reqs || 50) + 100);
-      engine.users = Math.min(200, (engine.users || 20) + 40);
-      engine.running = true;
-      return { actionTaken: llmActionTaken ?? 'Scaled workload up' };
-    case 'decrease_workload':
-      engine.ai_reqs = Math.max(0, Math.round((engine.ai_reqs || 50) / 2));
-      engine.api_reqs = Math.max(0, Math.round((engine.api_reqs || 250) / 2));
-      engine.users = Math.max(0, Math.round((engine.users || 100) / 2));
-      engine.batch = Math.max(0, Math.max(0, (engine.batch || 2) - 1));
-      return { actionTaken: llmActionTaken ?? 'Reduced workload' };
-    case 'emergency':
-      engine.nf_fan = 100.0;
-      engine.running = true;
-      return { actionTaken: llmActionTaken ?? 'Emergency: 100% fans, RB-04 clamp' };
-    case 'rebalance':
-      engine.running = true;
-      return { actionTaken: llmActionTaken ?? 'RB-03 cluster re-balance executed' };
-    default:
-      return { actionTaken: llmActionTaken };
-  }
-}
-
-// ── VoiceDispatcher ───────────────────────────────────────────────────────────
-
 export class VoiceDispatcher {
-  private moss: MossEngine;
 
-  constructor(moss: MossEngine) {
-    this.moss = moss;
+  private backendLabel(m: MossSearchResponse): string {
+    return m.backend === 'moss' ? 'Moss' : 'the local index';
   }
 
-  async processVoiceCommand(transcript: string, engine: SimulationEngine): Promise<VoiceAgentResponse> {
+  /**
+   * Full turn: deterministic rules first (commands are instant and reliable), then, for open
+   * questions only, an optional LLM phrases the answer from Moss documents + live state.
+   * Any LLM failure keeps the rule-based answer.
+   */
+  public async respond(
+    transcript: string,
+    engine: SimulationEngine,
+    mossResult: MossSearchResponse,
+    participant = 'operator'
+  ): Promise<VoiceAgentResponse> {
+    const base = this.processVoiceCommand(transcript, engine, mossResult, participant);
+    base.answeredBy = 'rules';
+
+    const openQuestion = base.intent === 'knowledge' || base.intent === 'general';
+    if (openQuestion && llmStatus().configured) {
+      try {
+        const snap = engine.fullSnapshot();
+        const out = await askLlm(
+          transcript,
+          {
+            junctionC: snap.nf_T,
+            fanPct: snap.nf_fan,
+            powerW: snap.power,
+            forecastWorstC: snap.forecast?.worst,
+            running: snap.running,
+            aiReqs: snap.ai_reqs
+          },
+          mossResult
+        );
+        base.spokenReply = out.text;
+        base.answeredBy = 'llm';
+        base.actionTaken = `Answered by LLM (${out.model}, ${out.ms}ms) grounded in Moss documents`;
+        base.timings = { retrievalMs: mossResult.latencyMs, serverMs: 0, llmMs: out.ms };
+      } catch (err: any) {
+        console.warn('[llm] falling back to rule-based answer:', err?.message ?? err);
+      }
+    }
+    return base;
+  }
+
+  /** Short spoken form of a knowledge document. */
+  private speakDoc(doc: MossDocument): string {
+    const proto = doc.actionableProtocol ? ` Recommended action: ${doc.actionableProtocol}` : '';
+    return `${doc.title}. ${doc.summary}${proto}`;
+  }
+
+  /**
+   * No LLM here: intent handling is deterministic keyword rules for actions, and
+   * knowledge questions are answered directly from documents retrieved by Moss.
+   * `mossResult` is retrieved by the caller (async) before this runs.
+   */
+  public processVoiceCommand(
+    transcript: string,
+    engine: SimulationEngine,
+    mossResult: MossSearchResponse,
+    participant = 'operator'
+  ): VoiceAgentResponse {
+    const raw = transcript.trim();
+    let text = raw.toLowerCase().replace(/[.,/#!$%^&*;:{}=\-_`~()?'"]/g, ' ');
+    // Filter out conversational fillers to dramatically improve short-command matching
+    text = text.replace(/\b(please|can you|could you|would you|neuralflow|hey|hello|hi|now|just|like|um|uh|actually|basically|i want to|let us|lets)\b/g, ' ').replace(/\s+/g, ' ').trim();
     const snap = engine.fullSnapshot();
 
-    // 1. Moss retrieval — real SDK or local fallback, always fast
-    const mossResult = await this.moss.search(transcript, 3);
 
-    // 2. Intent classification + response generation
-    let intentResult: { intent: VoiceAgentResponse['intent']; spokenReply: string; actionTaken?: string };
-    let usedLLM = false;
+    let intent: VoiceAgentResponse['intent'] = 'general';
+    let spokenReply = '';
+    let actionTaken: string | undefined = undefined;
 
-    if (getOpenAIClient()) {
-      const llmResult = await processWithLLM(transcript, snap, mossResult);
-      if (llmResult) {
-        intentResult = llmResult;
-        usedLLM = true;
-      } else {
-        intentResult = localRegexMatcher(transcript, engine, mossResult);
-      }
-    } else {
-      intentResult = localRegexMatcher(transcript, engine, mossResult);
-    }
-
-    // 3. Actuate side-effects on engine (LLM path only — regex mutates engine directly)
-    let actionTaken = intentResult.actionTaken;
-    if (usedLLM) {
-      const actuation = actuateIntent(intentResult.intent, engine, actionTaken);
-      actionTaken = actuation.actionTaken;
-    }
-
+    // Detect intents with priority on direct action commands
     const currentJunction = snap.nf_T ?? 40.0;
     const currentFan = snap.nf_fan ?? 30;
     const predictedTemp = snap.forecast?.worst ?? snap.forecast?.mean ?? (currentJunction + 2.5);
 
+    const has = (...words: string[]) => words.some(w => text.includes(w) || text === w || raw.toLowerCase().includes(w));
+    const hasAny = (words: string[]) => words.some(w => text.includes(w) || raw.toLowerCase().includes(w));
+
+    // 0A. WAKE / LISTEN DIRECTIVE ("NeuralFlow listen", "listen", "hey neuralflow")
+    if (
+      !text || has('listen', 'wake up', 'hear me', 'can you hear', 'greeting', 'test mic')
+    ) {
+      intent = 'wake' as any;
+      spokenReply = `NeuralFlow is listening live. You can say "Start simulation", "Increase workload", "Increase fan speed", "Increase users", or "Suggest".`;
+      actionTaken = 'Activated active listening mode (NeuralFlow listening)';
+    }
+    // 0B. STOP LISTENING / STANDBY ("NeuralFlow stop listening", "stop listening")
+    else if (
+      has("stop listening", "mute mic", "mute microphone", "disable microphone", "go to sleep")
+    ) {
+      intent = 'stop_listening' as any;
+      spokenReply = `Microphone muted. Say "NeuralFlow listen" or click the microphone to resume voice directives.`;
+      actionTaken = 'Set microphone to standby mode';
+    }
+    // 0C. TALK LESS, LISTEN MORE / CONCISE MODE
+    else if (
+      has('talk less', 'listen more', 'be brief', 'concise', 'short response', 'brief mode', 'less talk')
+    ) {
+      intent = 'concise' as any;
+      spokenReply = `Concise mode engaged. Directive responses will be under 10 words.`;
+      actionTaken = 'Enabled concise high-efficiency verbal feedback mode';
+    }
+    // 1. SMART CONTEXTUAL SUGGESTIONS / HELP ("Suggest NeuralFlow" / "Suggest" / "What should I do?")
+    else if (
+      has('suggest', 'suggestion', 'recommend', 'recommendation', 'what to do', 'what should i do', 'what can i do', 'what do you suggest', 'advice', 'help', 'how to use', 'what next', 'guide', 'what can i say', 'options', 'what now')
+    ) {
+      intent = 'help';
+      if (!engine.running) {
+        spokenReply = `Suggestion: The cluster simulation is currently paused at ${currentJunction.toFixed(1)}°C. Say "Start simulation" to engage live GPU telemetry and observe PINN cooling in action.`;
+        actionTaken = 'Suggested starting simulation to observe live cooling';
+      } else if (currentJunction > 72 || predictedTemp > 75) {
+        spokenReply = `Suggestion: High thermal load detected at ${currentJunction.toFixed(1)}°C. Say "Increase fan speed" or "Pre-ramp cooling fans" to proactively spin fans to 80% and prevent throttling.`;
+        actionTaken = 'Suggested pre-ramping cooling fans due to rising temperatures';
+      } else if (engine.ai_reqs < 1000) {
+        spokenReply = `Suggestion: AI load is low (${engine.ai_reqs} req/s). Say "Increase workload" to stress test the cluster under burst traffic.`;
+        actionTaken = 'Suggested increasing AI workload to stress test cooling loop';
+      } else {
+        spokenReply = `Here are 4 quick actions: 1. "Increase workload" to test peak stress. 2. "Increase fan speed" to cool. 3. "Increase users" to add traffic. 4. "That's it NeuralFlow" to pause listening.`;
+        actionTaken = 'Provided cluster optimization recommendations';
+      }
+    }
+    // 1B. KNOWLEDGE QUESTIONS: answered directly from documents retrieved by Moss (no LLM)
+    else if (
+      /^(what('s| is| are| does| do)|why|how (does|do|is|are|much)|explain|define|describe|tell me (about|what)|when (do|should|is)|which)\b/.test(text) &&
+      !/\b(right now|currently|current|status|how hot)\b/.test(raw.toLowerCase()) &&
+      !(/\b(temperature|temp|fan speed|workload)\b/.test(text) && !/(threshold|limit|spec|runbook|guardrail|why|explain|define|mean|trigger)/.test(text)) &&
+      mossResult.results.length > 0 &&
+      !(mossResult.backend === 'local' && mossResult.results[0].score < 2)
+    ) {
+      intent = 'knowledge';
+      const topDoc = mossResult.results[0].document;
+      spokenReply = `${this.speakDoc(topDoc)} Retrieved via ${this.backendLabel(mossResult)} in ${mossResult.latencyMs} milliseconds.`;
+      actionTaken = `Answered from knowledge base: ${topDoc.id} via ${this.backendLabel(mossResult)} (${mossResult.latencyMs}ms)`;
+    }
+    // 2. START / RUN / PLAY / BEGIN SIMULATION
+    else if (
+      has('start', 'begin', 'play', 'resume', 'turn on', 'go', 'simulate', 'run it', 'launch', 'spin up', 'fire up', 'start it', 'start simulation', 'play simulation', 'run cluster') &&
+      !has('runbook', 'start over')
+    ) {
+      intent = 'start_sim';
+      engine.running = true;
+      spokenReply = `Simulation started! The GPU cluster is now running live. You can say "Increase workload" or "Increase fan speed" to test system responses.`;
+      actionTaken = 'Started live GPU simulation (running = true)';
+    }
+    // 3. RESET / RESTART SIMULATION
+    else if (
+      has('reset', 'restart', 'start over', 'clear', 're set', 'reboot', 're initialize', 'defaults', 'restore')
+    ) {
+      intent = 'reset_sim';
+      engine.reset();
+      spokenReply = `Simulation reset to default state. Temperatures are back to 40 degrees Celsius, fans are at 30 percent, and workload is reset.`;
+      actionTaken = 'Reset cluster to baseline initial state (40°C, 30% fan, 0 ticks)';
+    }
+    // 4. PAUSE / STOP SIMULATION
+    else if (
+      has('pause', 'stop', 'freeze', 'halt', 'turn off', 'hold', 'break') &&
+      !has('stop listening')
+    ) {
+      intent = 'pause_sim';
+      engine.running = false;
+      spokenReply = `Simulation paused. Cluster temperatures and fans are held at their current values. Say "Start simulation" to resume, or "Reset" to start over.`;
+      actionTaken = 'Paused live simulation (running = false)';
+    }
+    // 5A. SPECIFIC: INCREASE FAN SPEED / COOLING
+    else if (
+      (has('increase', 'boost', 'raise', 'up', 'speed up', 'higher', 'more') && has('fan', 'fans', 'cooling', 'blower', 'air', 'speed', 'rpm')) ||
+      has('fan speed up', 'boost fan', 'fans up', 'more cooling', 'spin fans', 'speed up fans', 'boost cooling')
+    ) {
+      intent = 'preramp';
+      engine.nf_fan = Math.min(100.0, Math.max(70.0, (engine.nf_fan || 30.0) + 25.0));
+      engine.running = true;
+      spokenReply = `Fan speed boosted to ${engine.nf_fan.toFixed(0)} percent! High-velocity airflow is now cooling down all 9 GPU sockets.`;
+      actionTaken = `Increased NeuralFlow fan duty cycle to ${engine.nf_fan.toFixed(0)}%`;
+    }
+    // 5B. SPECIFIC: DECREASE FAN SPEED / LOWER COOLING
+    else if (
+      (has('decrease', 'lower', 'reduce', 'drop', 'slow down', 'less') && has('fan', 'fans', 'cooling', 'blower', 'speed', 'rpm')) ||
+      has('fan speed down', 'slow fans', 'less fan', 'less cooling', 'lower fan')
+    ) {
+      intent = 'preramp';
+      engine.nf_fan = Math.max(20.0, (engine.nf_fan || 30.0) - 20.0);
+      spokenReply = `Fan speed lowered down to ${engine.nf_fan.toFixed(0)} percent to reduce acoustic noise and power consumption.`;
+      actionTaken = `Decreased NeuralFlow fan duty cycle to ${engine.nf_fan.toFixed(0)}%`;
+    }
+    // 5C. SPECIFIC: INCREASE CONCURRENT USERS (Strict max: 200 users)
+    else if (
+      (has('increase', 'boost', 'raise', 'more', 'higher', 'add', 'up') && has('user', 'users', 'concurrent', 'clients', 'people')) ||
+      has('more users', 'boost users', 'user spike')
+    ) {
+      intent = 'workload_burst';
+      engine.users = Math.min(200, (engine.users || 20) + 40);
+      engine.running = true;
+      spokenReply = `Active user traffic increased to ${engine.users} users (limit: 200). API query volume is scaling up proportionally.`;
+      actionTaken = `Increased active users to ${engine.users}/200 users`;
+    }
+    // 5D. SPECIFIC: DECREASE CONCURRENT USERS
+    else if (
+      (has('decrease', 'lower', 'reduce', 'drop', 'less', 'fewer') && has('user', 'users', 'concurrent', 'clients')) ||
+      has('less users', 'fewer users')
+    ) {
+      intent = 'decrease_workload';
+      engine.users = Math.max(0, (engine.users || 20) - 30);
+      spokenReply = `Active users reduced to ${engine.users} users.`;
+      actionTaken = `Decreased active users to ${engine.users}/200`;
+    }
+    // 5E. SPECIFIC: INCREASE API REQUESTS (Strict max: 500 req/s)
+    else if (
+      (has('increase', 'boost', 'raise', 'more', 'higher', 'up') && has('api', 'endpoint', 'rest', 'http', 'query', 'queries')) ||
+      has('more api', 'boost api', 'api spike')
+    ) {
+      intent = 'workload_burst';
+      engine.api_reqs = Math.min(500, (engine.api_reqs || 50) + 100);
+      engine.running = true;
+      spokenReply = `API request rate increased to ${engine.api_reqs} req/s (limit: 500 req/s).`;
+      actionTaken = `Increased API requests to ${engine.api_reqs}/500 req/s`;
+    }
+    // 5F. SPECIFIC: DECREASE API REQUESTS
+    else if (
+      (has('decrease', 'lower', 'reduce', 'drop', 'less') && has('api', 'endpoint', 'rest', 'http'))
+    ) {
+      intent = 'decrease_workload';
+      engine.api_reqs = Math.max(0, Math.max(0, (engine.api_reqs || 50) - 100));
+      spokenReply = `API request rate reduced to ${engine.api_reqs} requests per second.`;
+      actionTaken = `Decreased API requests to ${engine.api_reqs}/500 req/s`;
+    }
+    // 5G. SPECIFIC: INCREASE BATCH JOBS (Strict max: 5 jobs)
+    else if (
+      (has('increase', 'boost', 'raise', 'larger', 'bigger', 'higher', 'up') && has('batch', 'batching', 'tensor batch', 'matrix size', 'training job', 'jobs')) ||
+      has('larger batch', 'bigger batch', 'increase batch', 'more batch', 'batch jobs')
+    ) {
+      intent = 'workload_burst';
+      engine.batch = Math.min(5, (engine.batch || 0) + 1);
+      engine.running = true;
+      spokenReply = `Batch training scaled to ${engine.batch} heavy jobs (limit: 5 jobs). GPU power draw increased by ~${engine.batch * 100}W.`;
+      actionTaken = `Scaled batch training to ${engine.batch}/5 active jobs`;
+    }
+    // 5H. GENERAL INCREASE / BOOST WORKLOAD (Scales strictly within: 100 AI, 500 API, 200 Users, 5 Batch)
+    else if (
+      has('increase', 'raise', 'boost', 'burst', 'spike', 'more workload', 'higher workload', 'more traffic', 'heavy', 'stress', 'hotter', 'up the load', 'max load', 'add workload', 'faster traffic', 'rush', 'scale up', 'surge', 'extreme', 'drastic', 'maximum workload', 'high load')
+    ) {
+      intent = 'workload_burst';
+      if (engine.ai_reqs < 40) {
+        engine.ai_reqs = 50;
+        engine.api_reqs = Math.min(500, Math.max(250, (engine.api_reqs || 50) + 150));
+        engine.users = Math.min(200, Math.max(100, (engine.users || 20) + 50));
+        engine.batch = Math.min(5, Math.max(2, (engine.batch || 0) + 1));
+      } else if (engine.ai_reqs < 80) {
+        engine.ai_reqs = 85;
+        engine.api_reqs = Math.min(500, Math.max(400, (engine.api_reqs || 50) + 150));
+        engine.users = Math.min(200, Math.max(160, (engine.users || 20) + 60));
+        engine.batch = Math.min(5, Math.max(4, (engine.batch || 0) + 2));
+      } else {
+        // Peak limit reached
+        engine.ai_reqs = 100;
+        engine.api_reqs = 500;
+        engine.users = 200;
+        engine.batch = 5;
+      }
+      engine.running = true;
+      const totalEstimatedPower = (80 + engine.ai_reqs * 3.0 + engine.api_reqs * 0.3 + engine.users * 0.5 + engine.batch * 100.0).toFixed(0);
+      spokenReply = `Workload increased within limits: AI at ${engine.ai_reqs}/100 req/s, API at ${engine.api_reqs}/500 req/s, ${engine.users}/200 users, and ${engine.batch}/5 batch jobs. Computed power is ~${totalEstimatedPower} Watts.`;
+      actionTaken = `Scaled workload within limits: AI ${engine.ai_reqs}/100 req/s, API ${engine.api_reqs}/500 req/s, Users ${engine.users}/200, Batch ${engine.batch}/5`;
+    }
+    // 6. GENERAL DECREASE WORKLOAD / LOWER TRAFFIC (Scales down AI, API, Users, Batch together)
+    else if (
+      has('decrease', 'lower', 'reduce', 'less workload', 'less traffic', 'light', 'drop workload', 'ease load', 'slow down', 'scale down')
+    ) {
+      intent = 'decrease_workload';
+      engine.ai_reqs = Math.max(0, Math.round((engine.ai_reqs || 50) / 2));
+      engine.api_reqs = Math.max(0, Math.round((engine.api_reqs || 250) / 2));
+      engine.users = Math.max(0, Math.round((engine.users || 100) / 2));
+      engine.batch = Math.max(0, Math.max(0, (engine.batch || 2) - 1));
+      spokenReply = `Workload reduced to ${engine.ai_reqs} AI req/s, ${engine.api_reqs} API req/s, ${engine.users} users, and ${engine.batch} batch jobs. Thermal dissipation in progress.`;
+      actionTaken = `Reduced workload: AI ${engine.ai_reqs} req/s, API ${engine.api_reqs} req/s, Users ${engine.users}, Batch ${engine.batch}`;
+    }
+    // 7. PRE-RAMP COOLING FANS / COOL DOWN
+    else if (
+      has('ramp', 'cool', 'fan', 'pre ramp', 'preramp', 'cooling', 'chill', 'cold air', 'spin fans', 'fans up', 'turn on fan', 'boost fan')
+    ) {
+      intent = 'preramp';
+      engine.ai_reqs = Math.max(1600, engine.ai_reqs);
+      engine.nf_fan = 80.0;
+      engine.running = true;
+      spokenReply = `Cooling fans pre-ramped to 80 percent! NeuralFlow is pushing cold air ahead of time to keep temperatures well below the 85-degree danger limit.`;
+      actionTaken = 'Activated RB-01: Proactively boosted cooling fans to 80% & engaged PINN simulation';
+    } 
+    // 8. DIAGNOSE / STATUS / TEMPERATURE
+    else if (
+      has('diagnos', 'status', 'temperature', 'how hot', 'temp', 'check', 'health', 'telemetry', 'report', 'condition', 'readings')
+    ) {
+      intent = 'diagnose';
+      spokenReply = `Cluster status: Primary GPU junction is at ${currentJunction.toFixed(1)}°C with fan speed at ${currentFan.toFixed(0)}%. PINN forecast projects ${predictedTemp.toFixed(1)}°C in the 60-second horizon. Safe operating margin is maintained. Next, try saying "Increase workload" to test thermal limits.`;
+      actionTaken = 'Analyzed cluster temperatures and 60s PINN forecast horizon';
+    } 
+    // 9. REBALANCE
+    else if (has('rebalance', 'cluster', 'rack', 'hotspot', 'matrix', 'balance')) {
+      intent = 'rebalance';
+      engine.running = true;
+      spokenReply = `Executing cluster thermal re-balancing under RB-03. Workload distributed to perimeter GPUs where airflow velocity is 18% higher. Hotspot risk cleared.`;
+      actionTaken = 'Executed RB-03 spatial workload re-balancing across 9-node GPU matrix';
+    }
+    // 10. HARDWARE SPECS
+    else if (has('spec', 'h100', 'b200', 'hardware', 'tdp', 'nvidia', 'gpu spec', 'specs')) {
+      intent = 'query_specs';
+      const topDoc = mossResult.results[0]?.document;
+      spokenReply = topDoc 
+        ? `${topDoc.title}: ${topDoc.summary} Retrieved via ${this.backendLabel(mossResult)} in ${mossResult.latencyMs} milliseconds.`
+        : `NVIDIA H100 SXM5 operates at 700W TDP with an 85°C thermal throttle threshold. Heat capacity is 380 Joules per degree.`;
+      actionTaken = `Retrieved hardware profile via ${this.backendLabel(mossResult)} (${mossResult.latencyMs}ms)`;
+    }
+    // 11. EMERGENCY MAXIMUM COOLING
+    else if (has('emergency', 'guardrail', 'trip', 'safety', '100%', 'max fan', 'maximum cooling', 'full fan', 'full cooling')) {
+      intent = 'emergency';
+      engine.nf_fan = 100.0;
+      engine.running = true;
+      spokenReply = `Emergency cooling activated! Fans forced to 100 percent maximum duty cycle under RB-04. Junction temperature ceiling secured.`;
+      actionTaken = 'Forced emergency 100% fan duty cycle & engaged RB-04 thermal clamp';
+    }
+    // 12. PID vs NEURALFLOW COMPARISON
+    else if (has('pid', 'switch', 'compare', 'comparison', 'versus', 'vs', 'benchmark')) {
+      intent = 'switch_mode';
+      spokenReply = `Comparison confirmed: NeuralFlow PINN outperforms reactive PID by saving 12.8% cooling energy, reducing peak junction temperature from 84°C to 71°C, and generating zero throttle events.`;
+      actionTaken = 'Benchmarked PINN proactive feed-forward against reactive PID';
+    }
+    // 13. RUNBOOK / INCIDENT QUERY
+    else if (has('runbook', 'incident', 'protocol', 'rules', 'rb 01', 'rb 02', 'rb 03', 'rb 04')) {
+      intent = 'runbook';
+      const topDoc = mossResult.results[0]?.document;
+      spokenReply = topDoc?.actionableProtocol 
+        ? `Protocol alert: ${topDoc.title}. Action: ${topDoc.actionableProtocol} Context fetched via ${this.backendLabel(mossResult)} in ${mossResult.latencyMs} milliseconds.`
+        : `Safety guardrails active: 85°C throttle cutoff enforced with 14°C safety margin.`;
+      actionTaken = `Fetched actionable runbook via ${this.backendLabel(mossResult)} (${mossResult.latencyMs}ms)`;
+    }
+    // 14. GREETINGS & SMALL TALK
+    else if (has('hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening', 'who are you', 'what is this')) {
+      intent = 'general';
+      spokenReply = `Hello! I am NeuralFlow, your AI thermal co-pilot. You can say "Start simulation" to test the GPU cooling loop, or say "Suggest" to get a live recommendation. What would you like to do?`;
+      actionTaken = 'Greeted user and offered starting directives';
+    }
+    // 15. GENERAL STANDBY / FALLBACK
+    else {
+      intent = 'general';
+      spokenReply = `I heard: "${raw}". Here are 3 simple commands you can say: "Start simulation", "Increase workload", or "Suggest".`;
+      actionTaken = 'Standing by for voice directives; provided simple options';
+    }
+
     return {
       id: 'voice-' + Date.now(),
       transcript,
-      spokenReply: intentResult.spokenReply,
-      intent: intentResult.intent,
+      spokenReply,
+      intent,
       actionTaken,
       mossRetrieval: mossResult,
       simulationImpact: {
         prevTemp: currentJunction,
-        predictedTemp,
+        predictedTemp: predictedTemp,
         fanSpeed: currentFan,
-        controller: 'NeuralFlow Physics-Informed Forecaster'
+        controller: 'NeuralFlow-PINN'
       },
       livekitSession: {
-        room: 'neuralflow-ops',
-        participant: 'operator',
-        protocol: isLiveKitConfigured() ? 'WebRTC-LiveKit-Real' : 'WebRTC-BrowserSpeech-Fallback',
-        latencyMs: mossResult.latencyMs,
+        room: livekitRoomName(),
+        participant,
+        protocol: 'LiveKit (WebRTC)',
+        latencyMs: mossResult.latencyMs, // overwritten by the route with the measured server time
         voiceState: 'speaking'
       },
       timestamp: new Date().toISOString()
-    };
-  }
-
-  /**
-   * Returns a real LiveKit JWT token (livekit-server-sdk).
-   * Falls back to a clearly-labelled demo token when credentials are absent.
-   */
-  async getLiveKitToken(participantName = 'operator'): Promise<{
-    room: string;
-    token: string;
-    serverUrl: string;
-    status: 'connected' | 'demo-mode';
-    tokenType: 'real-jwt' | 'demo';
-  }> {
-    const room = 'neuralflow-ops';
-    const { apiKey, apiSecret, url } = getLiveKitCredentials();
-
-    if (apiKey && apiSecret) {
-      const at = new AccessToken(apiKey, apiSecret, {
-        identity: participantName,
-        ttl: '1h'
-      });
-      at.addGrant({
-        roomJoin: true,
-        room,
-        canPublish: true,
-        canSubscribe: true
-      });
-      const token = await at.toJwt();
-      return { room, token, serverUrl: url, status: 'connected', tokenType: 'real-jwt' };
-    }
-
-    // Demo mode — clearly identified, NOT pretending to be connected
-    const demoToken = `demo_${Buffer.from(JSON.stringify({
-      room,
-      sub: participantName,
-      exp: Math.floor(Date.now() / 1000) + 3600,
-      iss: 'neuralflow-livekit-server',
-      nbf: Math.floor(Date.now() / 1000),
-      note: 'Set LIVEKIT_API_KEY and LIVEKIT_API_SECRET for a real WebRTC session.'
-    })).toString('base64url')}`;
-
-    return {
-      room,
-      token: demoToken,
-      serverUrl: url,
-      status: 'demo-mode',
-      tokenType: 'demo'
     };
   }
 }

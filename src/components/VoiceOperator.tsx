@@ -57,10 +57,8 @@ const DEFAULT_MESSAGES: Message[] = [
   {
     id: 'init-1',
     sender: 'agent',
-    text: 'Welcome to NeuralFlow Zero-Latency Voice Dispatcher! Here are 4 simple things you can do:\n\n1. "Start simulation" — turns on the GPU cluster to begin real-time cooling & telemetry.\n2. "Increase workload" — sends heavy AI traffic to heat up the GPUs.\n3. "Pre-ramp fans" — spins fans to 80% to cool down before overheating.\n4. "Reset" — restores temperatures to 40°C and fans to 30%.\n\nSpeak into your microphone, click "Simulate Voice", or click any command below!',
+    text: 'Welcome to the NeuralFlow Voice Dispatcher! Here are 4 simple things you can do:\n\n1. "Start simulation" — turns on the GPU cluster to begin real-time cooling & telemetry.\n2. "Increase workload" — sends heavy AI traffic to heat up the GPUs.\n3. "Pre-ramp fans" — spins fans to 80% to cool down before overheating.\n4. "Reset" — restores temperatures to 40°C and fans to 30%.\n\nSpeak into your microphone, click "Simulate Voice", or click any command below!',
     timestamp: new Date().toLocaleTimeString(),
-    mossLatency: 1.1,
-    retrievedDocs: ['GD-01: Real-Time Voice SLA', 'RB-01: Burst Mitigation']
   }
 ];
 
@@ -85,6 +83,11 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
     micAudioLevel,
     agentAudioLevel,
     livekitRoomName,
+    livekitStatus,
+    livekitDetail,
+    livekitParticipants,
+    lastRetrieval,
+    lastTimings,
     connectLiveKit,
     disconnectLiveKit,
     toggleMute,
@@ -96,7 +99,39 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
 
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
   const [inputPrompt, setInputPrompt] = useState<string>('');
-  const [lastMossData, setLastMossData] = useState<MossSearchResponse | null>(null);
+  // Real data from the last voice turn (measured on the server, not hardcoded).
+  const lastMossData: MossSearchResponse | null = lastRetrieval;
+  const [retrievalStats, setRetrievalStats] = useState<{ status: any; latency: any[] } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/moss/stats')
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled) setRetrievalStats(d); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [lastRetrieval]);
+  const activeBackend: 'moss' | 'local' =
+    lastMossData?.backend ?? retrievalStats?.status?.activeBackend ?? 'local';
+  const isMossBackend = activeBackend === 'moss';
+  const backendStats = retrievalStats?.latency?.find((l: any) => l.backend === activeBackend);
+  const roomLabel =
+    livekitStatus === 'connected'
+      ? `In room (${livekitParticipants} ${livekitParticipants === 1 ? 'participant' : 'participants'})`
+      : livekitStatus === 'connecting'
+      ? 'Connecting...'
+      : livekitStatus === 'unconfigured'
+      ? 'Not configured (local voice only)'
+      : livekitStatus === 'error'
+      ? 'Connection failed'
+      : 'Standby';
+  const roomLabelClass =
+    livekitStatus === 'connected'
+      ? 'text-emerald-400 font-semibold'
+      : livekitStatus === 'connecting'
+      ? 'text-sky-300'
+      : livekitStatus === 'unconfigured' || livekitStatus === 'error'
+      ? 'text-amber-400 font-semibold'
+      : 'text-zinc-500';
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   // Auto-scroll messages
@@ -159,9 +194,12 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
               </div>
               <p className="text-[11px] text-zinc-400 mt-0.5">
                 Room: <span className="text-sky-300 font-mono">#{livekitRoomName}</span> &bull;{' '}
-                <span className={isLiveKitConnected ? 'text-emerald-400 font-semibold' : 'text-zinc-500'}>
-                  {isLiveKitConnected ? (isMuted ? 'Muted' : 'Always Listening') : 'Standby'}
+                <span className={roomLabelClass} title={livekitDetail || undefined}>
+                  {roomLabel}
                 </span>
+                {isLiveKitConnected && (
+                  <span className="text-zinc-500"> &bull; {isMuted ? 'mic muted' : 'mic on'}</span>
+                )}
               </p>
             </div>
           </div>
@@ -205,7 +243,7 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
           </div>
         </div>
 
-        {/* Moss Sub-10ms Retrieval Card */}
+        {/* Moss Retrieval Card */}
         <div className="p-4 rounded-2xl bg-[#0d0d24] border border-[#2ed573]/30 shadow-lg flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-[#2ed573]/20 flex items-center justify-center border border-[#2ed573]/40">
@@ -214,19 +252,25 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-white">Moss Context Engine</h3>
-                <span className="px-1.5 py-0.5 text-[9px] font-mono rounded-full bg-[#2ed573]/20 text-[#2ed573] border border-[#2ed573]/30 font-bold">
-                  Zero Vector DB
+                <span className={`px-1.5 py-0.5 text-[9px] font-mono rounded-full border font-bold ${
+                  isMossBackend
+                    ? 'bg-[#2ed573]/20 text-[#2ed573] border-[#2ed573]/30'
+                    : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                }`}>
+                  {!isMossBackend ? 'Local fallback' : lastMossData?.mode === 'cloud' ? 'Moss Cloud (network)' : 'Moss (in-process)'}
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400 mt-0.5">
-                Latency: <strong className="text-[#2ed573] font-mono">{lastMossData ? `${lastMossData.latencyMs} ms` : '< 1.5 ms'}</strong> (Sub-10ms Guaranteed)
+                Last lookup: <strong className="text-[#2ed573] font-mono">{lastMossData ? `${lastMossData.latencyMs} ms` : 'none yet'}</strong> (measured)
               </p>
             </div>
           </div>
           <div className="text-right">
-            <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
-              <CheckCircle2 className="w-3 h-3" /> SLA Passed
-            </span>
+            {lastMossData && (
+              <span className={`text-[10px] font-mono flex items-center gap-1 ${lastMossData.latencyMs < 10 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                <CheckCircle2 className="w-3 h-3" /> {lastMossData.latencyMs < 10 ? 'Under 10 ms' : 'Over 10 ms'}
+              </span>
+            )}
           </div>
         </div>
 
@@ -474,7 +518,17 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
                     <span className="text-[9px] font-mono text-zinc-500">{m.timestamp}</span>
                     {m.mossLatency !== undefined && (
                       <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#2ed573]/20 text-[#2ed573] border border-[#2ed573]/30">
-                        ⚡ Moss {m.mossLatency}ms
+                        ⚡ {m.mossBackend === 'local' ? 'Local' : 'Moss'} {m.mossLatency}ms
+                      </span>
+                    )}
+                    {m.answeredBy === 'llm' && (
+                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30">
+                        LLM {m.llmMs}ms
+                      </span>
+                    )}
+                    {m.via && (
+                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30">
+                        via {m.via}
                       </span>
                     )}
                   </div>
@@ -643,7 +697,7 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
               <h4 className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-2">
                 <Zap className="w-3.5 h-3.5 text-[#2ed573]" /> Quick Voice Dispatch Prompts
               </h4>
-              <span className="text-[10px] font-mono text-zinc-500">1-Click Dispatch &bull; Sub-10ms Moss Context</span>
+              <span className="text-[10px] font-mono text-zinc-500">1-Click Dispatch &bull; Moss-grounded answers</span>
             </div>
             <div className="flex flex-wrap gap-2">
               {quickPrompts.map((qp, idx) => (
@@ -661,18 +715,22 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
           </div>
         </div>
 
-        {/* Right Column: Moss Zero-Vector-DB Sub-10ms Inspector */}
+        {/* Right Column: Moss Retrieval Inspector (live, measured) */}
         <div className="space-y-4">
           <div className="p-5 rounded-2xl bg-[#09091b] border border-[#2ed573]/30 shadow-xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-white/10">
               <div className="flex items-center gap-2">
                 <Search className="w-4 h-4 text-[#2ed573]" />
                 <h3 className="text-xs font-bold uppercase tracking-wider text-white">
-                  Moss Sub-10ms Inspector
+                  Retrieval Inspector
                 </h3>
               </div>
-              <span className="px-2 py-0.5 text-[9px] font-mono rounded bg-[#2ed573]/20 text-[#2ed573] border border-[#2ed573]/30 font-bold">
-                Zero Vector DB
+              <span className={`px-2 py-0.5 text-[9px] font-mono rounded border font-bold ${
+                isMossBackend
+                  ? 'bg-[#2ed573]/20 text-[#2ed573] border-[#2ed573]/30'
+                  : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+              }`}>
+                {!isMossBackend ? 'Local fallback' : lastMossData?.mode === 'cloud' ? 'Moss Cloud' : 'Moss'}
               </span>
             </div>
 
@@ -681,32 +739,57 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
               <div className="flex items-center justify-between text-xs font-mono">
                 <span className="text-zinc-400">Context Lookup Speed</span>
                 <span className="text-lg font-black text-[#2ed573]">
-                  {lastMossData ? `${lastMossData.latencyMs} ms` : '< 2 ms'}
+                  {lastMossData ? `${lastMossData.latencyMs} ms` : '—'}
                 </span>
               </div>
               <div className="w-full bg-black/40 h-2 rounded-full overflow-hidden p-0.5 border border-white/5">
                 <div
                   className="h-full bg-gradient-to-r from-[#2ed573] to-[#1e90ff] rounded-full"
                   style={{
-                    width: `${Math.min(100, ((lastMossData?.latencyMs || 1.2) / 10.0) * 100)}%`
+                    width: `${Math.min(100, ((lastMossData?.latencyMs ?? 0) / 10.0) * 100)}%`
                   }}
                 />
               </div>
               <div className="flex justify-between text-[10px] font-mono text-zinc-500">
                 <span>0 ms</span>
-                <span className="text-emerald-400 font-semibold">Sub-10ms Target: PASS (under 2ms)</span>
+                <span className={`font-semibold ${lastMossData ? (lastMossData.latencyMs < 10 ? 'text-emerald-400' : 'text-amber-400') : 'text-zinc-500'}`}>
+                  {lastMossData
+                    ? `10 ms target: ${lastMossData.latencyMs < 10 ? 'met' : 'missed'} (${lastMossData.latencyMs} ms)`
+                    : 'Say something to run a lookup'}
+                </span>
                 <span>10 ms</span>
               </div>
             </div>
 
-            {/* Architecture Explainer */}
+            {/* Live measurements */}
             <div className="p-3.5 rounded-xl bg-[#0e0e28] border border-white/5 space-y-1.5 text-xs text-zinc-300">
               <div className="font-bold text-white flex items-center gap-1.5 text-[11px] uppercase tracking-wide">
-                <Layers className="w-3.5 h-3.5 text-sky-400" /> Zero Vector DB Architecture
+                <Layers className="w-3.5 h-3.5 text-sky-400" /> Live measurements
               </div>
-              <p className="text-[11px] text-zinc-400 leading-relaxed">
-                Moss eliminates external vector database network round-trips (Pinecone/Chroma), returning authoritative runbooks, hardware TDP constraints, and cooling procedures in &lt; 1ms directly in memory.
-              </p>
+              <div className="text-[11px] text-zinc-400 leading-relaxed font-mono space-y-0.5">
+                <div>Engine: {lastMossData?.retrievalEngine ?? (isMossBackend ? 'Moss (in-process)' : 'Local keyword index (fallback, not Moss)')}</div>
+                <div>
+                  Lookups ({activeBackend}): {backendStats?.count ?? 0}
+                  {backendStats?.count ? ` | p50 ${backendStats.p50} ms | p95 ${backendStats.p95} ms | max ${backendStats.max} ms` : ''}
+                </div>
+                {lastMossData?.embedMs !== undefined && (
+                  <div>Last lookup: query embedding {lastMossData.embedMs} ms + Moss search {lastMossData.searchMs} ms</div>
+                )}
+                {lastTimings && (
+                  <div>
+                    Last turn: retrieval {lastTimings.retrievalMs} ms{lastTimings.llmMs !== undefined ? ` | LLM ${lastTimings.llmMs} ms` : ''} | server {lastTimings.serverMs} ms | browser round trip {lastTimings.roundTripMs} ms
+                  </div>
+                )}
+                {(!isMossBackend || retrievalStats?.status?.mode === 'cloud') && (
+                  <div className="text-amber-400">
+                    {retrievalStats?.status?.error
+                      ? `${retrievalStats.status.state === 'cloud' ? 'Moss note' : 'Moss unavailable'}: ${retrievalStats.status.error}`
+                      : retrievalStats?.status?.configured
+                      ? 'Moss is still starting up...'
+                      : 'Moss credentials not set. Add MOSS_PROJECT_ID and MOSS_PROJECT_KEY to .env.'}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Last Retrieved Context Documents */}
@@ -714,7 +797,7 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
               <div className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 flex items-center justify-between">
                 <span>Authoritative Runbooks &amp; Specs</span>
                 <span className="text-[10px] font-mono text-zinc-500">
-                  {lastMossData?.results.length || 3} matched
+                  {lastMossData?.results.length ?? 0} matched
                 </span>
               </div>
 

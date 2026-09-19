@@ -1,4 +1,4 @@
-// NeuralFlow Controller — Proactive Physics-Informed Forecaster Cooling Controller
+// NeuralFlow Controller — Proactive Physics-Informed Cooling Controller
 export class NeuralFlowController {
   threshold: number;
   window: number[][];

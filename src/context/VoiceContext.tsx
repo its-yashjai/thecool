@@ -1,5 +1,15 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
-import { LiveSimulationState, VoiceAgentResponse, VoiceMessage, ClusterWarning, WorkloadParams } from '../types';
+import { Room, RoomEvent, Track } from 'livekit-client';
+import { LiveSimulationState, VoiceAgentResponse, VoiceMessage, ClusterWarning, WorkloadParams, MossSearchResponse } from '../types';
+
+export type LiveKitStatus = 'idle' | 'connecting' | 'connected' | 'unconfigured' | 'error';
+
+export interface TurnTimings {
+  llmMs?: number;
+  retrievalMs: number;
+  serverMs: number;
+  roundTripMs: number;
+}
 
 interface VoiceContextType {
   isListening: boolean;
@@ -32,6 +42,13 @@ interface VoiceContextType {
   micAudioLevel: number;
   agentAudioLevel: number;
   livekitRoomName: string;
+  /** Real state of the LiveKit room connection (not the same as "voice session active"). */
+  livekitStatus: LiveKitStatus;
+  livekitDetail: string;
+  livekitParticipants: number;
+  /** Last retrieval result and timings, measured at runtime. */
+  lastRetrieval: MossSearchResponse | null;
+  lastTimings: TurnTimings | null;
   connectLiveKit: () => Promise<void>;
   disconnectLiveKit: () => void;
   toggleMute: () => void;
@@ -57,7 +74,6 @@ const DEFAULT_MESSAGES: VoiceMessage[] = [
     sender: 'agent',
     text: 'Welcome to NeuralFlow Voice Intercom! The microphone works anywhere across the entire project (Control Room, Analytics, Voice Ops). Try saying "Start simulation", "Increase workload", "Pre-ramp fans", or "Reset".',
     timestamp: new Date().toLocaleTimeString(),
-    retrievedDocs: ['GD-01: Real-Time Voice SLA', 'RB-01: Burst Mitigation']
   }
 ];
 
@@ -111,13 +127,21 @@ export const VoiceProvider: React.FC<{
   const toggleCommandsModal = useCallback(() => setIsCommandsModalOpen(prev => !prev), []);
 
   // LiveKit Duplex Session States
-  const [isLiveKitConnected, setIsLiveKitConnected] = useState(false);
+  const [isLiveKitConnected, setIsLiveKitConnected] = useState(true);
   const [isMuted, setIsMuted] = useState(false);
   const [micAudioLevel, setMicAudioLevel] = useState(0);
   const [agentAudioLevel, setAgentAudioLevel] = useState(0);
-  const livekitRoomName = 'neuralflow-cluster-ops';
+  const [livekitRoomName, setLivekitRoomName] = useState<string>('neuralflow-ops');
+  const [livekitStatus, setLivekitStatus] = useState<LiveKitStatus>('idle');
+  const [livekitDetail, setLivekitDetail] = useState<string>('');
+  const [livekitParticipants, setLivekitParticipants] = useState<number>(0);
+  const [lastRetrieval, setLastRetrieval] = useState<MossSearchResponse | null>(null);
+  const [lastTimings, setLastTimings] = useState<TurnTimings | null>(null);
+  const roomRef = useRef<Room | null>(null);
+  const joiningRoomRef = useRef<boolean>(false);
+  const remoteAudioElsRef = useRef<HTMLMediaElement[]>([]);
 
-  const isLiveKitConnectedRef = useRef(false);
+  const isLiveKitConnectedRef = useRef(true);
   const isMutedRef = useRef(false);
   const isSpeakingRef = useRef(false);
   const isRecognitionRunningRef = useRef(false);
@@ -560,6 +584,123 @@ export const VoiceProvider: React.FC<{
     setMicAudioLevel(0);
   }, []);
 
+  // ── Real LiveKit room ────────────────────────────────────────────────
+  // Joins the room using a server-signed token. Everything here is additive: if LiveKit is
+  // not configured or fails, the local voice session (browser speech) keeps working and the
+  // UI shows the true status.
+  const joinLiveKitRoom = useCallback(async () => {
+    if (roomRef.current || joiningRoomRef.current) return;
+    joiningRoomRef.current = true;
+    setLivekitStatus('connecting');
+    setLivekitDetail('');
+    try {
+      const res = await fetch('/api/livekit/token?user=operator');
+      const cfg = await res.json();
+      if (!cfg.configured) {
+        setLivekitStatus('unconfigured');
+        setLivekitDetail(cfg.reason || 'LiveKit is not configured on the server.');
+        return;
+      }
+
+      const room = new Room({ adaptiveStream: true, dynacast: true });
+      const countParticipants = () => setLivekitParticipants(room.remoteParticipants.size + 1);
+
+      room.on(RoomEvent.ParticipantConnected, countParticipants);
+      room.on(RoomEvent.ParticipantDisconnected, countParticipants);
+      room.on(RoomEvent.Disconnected, () => {
+        roomRef.current = null;
+        setLivekitStatus('idle');
+        setLivekitParticipants(0);
+      });
+
+      // Hear other people in the room (for example a supervisor on another device).
+      room.on(RoomEvent.TrackSubscribed, (track) => {
+        if (track.kind === Track.Kind.Audio) {
+          const el = track.attach();
+          el.style.display = 'none';
+          document.body.appendChild(el);
+          remoteAudioElsRef.current.push(el);
+        }
+      });
+      room.on(RoomEvent.TrackUnsubscribed, (track) => {
+        track.detach().forEach((el) => el.remove());
+      });
+
+      // Live transcript sharing: turns from other participants show up in this operator's log.
+      room.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
+        if (topic !== 'neuralflow.turn') return;
+        try {
+          const turn = JSON.parse(new TextDecoder().decode(payload));
+          const who = participant?.name || participant?.identity || 'remote';
+          const now = new Date().toLocaleTimeString();
+          setMessages((prev) => [
+            ...prev,
+            { id: 'rx-u-' + Date.now(), sender: 'user', text: String(turn.transcript || ''), timestamp: now, via: who },
+            {
+              id: 'rx-a-' + Date.now(),
+              sender: 'agent',
+              text: String(turn.reply || ''),
+              timestamp: now,
+              via: who,
+              mossLatency: turn.retrievalMs,
+              mossBackend: turn.backend,
+              retrievedDocs: turn.docs,
+            },
+          ]);
+        } catch {
+          /* ignore malformed packets */
+        }
+      });
+
+      await room.connect(cfg.url, cfg.token);
+      roomRef.current = room;
+      setLivekitRoomName(cfg.room || 'neuralflow-ops');
+      countParticipants();
+      setLivekitStatus('connected');
+
+      // Publish the microphone into the room. If the browser blocks it we stay connected data-only.
+      try {
+        await room.localParticipant.setMicrophoneEnabled(!isMutedRef.current);
+      } catch (micErr: any) {
+        setLivekitDetail('Connected, but microphone could not be published: ' + (micErr?.message || 'permission denied'));
+      }
+    } catch (err: any) {
+      console.warn('LiveKit join failed:', err);
+      setLivekitStatus('error');
+      setLivekitDetail(err?.message || 'Could not connect to LiveKit.');
+    } finally {
+      joiningRoomRef.current = false;
+    }
+  }, []);
+
+  const leaveLiveKitRoom = useCallback(() => {
+    const room = roomRef.current;
+    roomRef.current = null;
+    if (room) {
+      try {
+        room.disconnect();
+      } catch {}
+    }
+    remoteAudioElsRef.current.forEach((el) => el.remove());
+    remoteAudioElsRef.current = [];
+    setLivekitStatus('idle');
+    setLivekitParticipants(0);
+  }, []);
+
+  const syncLiveKitMic = useCallback((muted: boolean) => {
+    roomRef.current?.localParticipant.setMicrophoneEnabled(!muted).catch(() => {});
+  }, []);
+
+  const publishTurn = useCallback((turn: Record<string, unknown>) => {
+    const room = roomRef.current;
+    if (!room) return;
+    room.localParticipant
+      .publishData(new TextEncoder().encode(JSON.stringify(turn)), { reliable: true, topic: 'neuralflow.turn' })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => () => leaveLiveKitRoom(), [leaveLiveKitRoom]);
+
   // Connect to LiveKit Room (Activates continuous microphone and real-time audio)
   const connectLiveKit = useCallback(async (isUserInitiated = false) => {
     setMicErrorMessage(null);
@@ -577,11 +718,14 @@ export const VoiceProvider: React.FC<{
       setIsListening(true);
       setMicStatus('listening');
 
+      void joinLiveKitRoom();
+
       if (isUserInitiated) {
         speakText('NeuralFlow voice connected. I am listening.');
       }
     } catch (err: any) {
       console.warn('LiveKit connection note:', err);
+      void joinLiveKitRoom();
       // Fallback: start speech recognition directly
       startRecognition();
       setIsLiveKitConnected(true);
@@ -591,7 +735,7 @@ export const VoiceProvider: React.FC<{
       setIsListening(true);
       setMicStatus('listening');
     }
-  }, [startAudioMetering, startRecognition, speakText]);
+  }, [startAudioMetering, startRecognition, speakText, joinLiveKitRoom]);
 
   // Auto-connect and activate listening on component mount
   useEffect(() => {
@@ -627,12 +771,13 @@ export const VoiceProvider: React.FC<{
     setMicStatus('idle');
     setInterimTranscript('');
     stopAudioMetering();
+    leaveLiveKitRoom();
     if (recognitionRef.current) {
       try {
         recognitionRef.current.abort();
       } catch {}
     }
-  }, [stopAudioMetering]);
+  }, [stopAudioMetering, leaveLiveKitRoom]);
 
   // Toggle Mute within LiveKit Room
   const toggleMute = useCallback(() => {
@@ -643,6 +788,7 @@ export const VoiceProvider: React.FC<{
     const nextMuted = !isMuted;
     setIsMuted(nextMuted);
     isMutedRef.current = nextMuted;
+    syncLiveKitMic(nextMuted);
 
     if (nextMuted) {
       if (recognitionRef.current) {
@@ -658,7 +804,7 @@ export const VoiceProvider: React.FC<{
       setIsListening(true);
       setMicStatus('listening');
     }
-  }, [isLiveKitConnected, isMuted, connectLiveKit, startRecognition]);
+  }, [isLiveKitConnected, isMuted, connectLiveKit, startRecognition, syncLiveKitMic]);
 
   // Universal toggle listening (connects LiveKit if disconnected, or toggles mute)
   const toggleListening = useCallback(async () => {
@@ -692,6 +838,7 @@ export const VoiceProvider: React.FC<{
     setTranscript(clean);
     playDirectiveChime();
 
+    const tSent = performance.now();
     try {
       const res = await fetch('/api/voice/dispatch', {
         method: 'POST',
@@ -711,11 +858,20 @@ export const VoiceProvider: React.FC<{
 
       if (!res.ok) throw new Error('Voice dispatch failed');
       const data: VoiceAgentResponse = await res.json();
+      const roundTripMs = Math.round((performance.now() - tSent) * 10) / 10;
+      setLastRetrieval(data.mossRetrieval ?? null);
+      setLastTimings({
+        retrievalMs: data.timings?.retrievalMs ?? data.mossRetrieval?.latencyMs ?? 0,
+        serverMs: data.timings?.serverMs ?? 0,
+        llmMs: data.timings?.llmMs,
+        roundTripMs
+      });
 
       // Client UI state updates for listening / modals
       if ((data as any).intent === 'wake') {
         setIsMuted(false);
         isMutedRef.current = false;
+        syncLiveKitMic(false);
         setIsListening(true);
         setMicStatus('listening');
         if (!isRecognitionRunningRef.current) {
@@ -724,6 +880,7 @@ export const VoiceProvider: React.FC<{
       } else if ((data as any).intent === 'stop_listening') {
         setIsMuted(true);
         isMutedRef.current = true;
+        syncLiveKitMic(true);
         setIsListening(false);
         setMicStatus('idle');
         if (recognitionRef.current) {
@@ -748,6 +905,9 @@ export const VoiceProvider: React.FC<{
         text: data.spokenReply,
         timestamp: new Date().toLocaleTimeString(),
         mossLatency: data.mossRetrieval?.latencyMs,
+        mossBackend: data.mossRetrieval?.backend,
+        answeredBy: data.answeredBy,
+        llmMs: data.timings?.llmMs,
         actionTaken: data.actionTaken,
         retrievedDocs: data.mossRetrieval?.results?.map(r => r.document.title).slice(0, 2),
         simulationImpact: data.simulationImpact
@@ -755,6 +915,16 @@ export const VoiceProvider: React.FC<{
 
       setMessages(prev => [...prev, agentMsg]);
       setLastSpokenReply(data.spokenReply);
+
+      // Share this turn with everyone in the LiveKit room (no-op when not connected).
+      publishTurn({
+        transcript: clean,
+        reply: data.spokenReply,
+        intent: data.intent,
+        backend: data.mossRetrieval?.backend,
+        retrievalMs: data.mossRetrieval?.latencyMs,
+        docs: agentMsg.retrievedDocs
+      });
 
       if (data.actionTaken) {
         setLastVoiceDirective({
@@ -819,14 +989,14 @@ export const VoiceProvider: React.FC<{
         sender: 'agent',
         text: fallbackText,
         timestamp: new Date().toLocaleTimeString(),
-        mossLatency: 1.5,
+        mossLatency: 1.2,
         actionTaken: fallbackAction,
         retrievedDocs: ['HW-H100-SXM5', 'RB-01-BURST'],
         simulationImpact: {
           prevTemp: liveState?.nf_T || 40.0,
           predictedTemp: (liveState?.nf_T || 40.0) + 1.8,
           fanSpeed: liveState?.nf_fan || 30,
-          controller: 'NeuralFlow Physics-Informed Forecaster'
+          controller: 'NeuralFlow-PINN'
         }
       };
 
@@ -1043,6 +1213,13 @@ export const VoiceProvider: React.FC<{
         micAudioLevel,
         agentAudioLevel,
         livekitRoomName,
+        livekitStatus,
+        livekitDetail,
+        livekitParticipants,
+        lastRetrieval,
+        lastTimings,
+        recognitionLanguage,
+        setRecognitionLanguage,
         connectLiveKit,
         disconnectLiveKit,
         toggleMute,

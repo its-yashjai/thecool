@@ -156,7 +156,7 @@ export function App() {
                   NeuralFlow
                 </h1>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#2ed573]/10 text-[#2ed573] border border-[#2ed573]/25 font-semibold">
-                  Forecaster v2.4
+                  PINN v2.4
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400 hidden sm:block">

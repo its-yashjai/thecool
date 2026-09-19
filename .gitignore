@@ -5,12 +5,9 @@ __pycache__/
 results/
 *.pt
 
-# deps / build
-node_modules/
-dist/
-bench/moss-results.json
-
-# secrets — never commit real keys
+# secrets
 .env
 .env.local
 .env.*.local
+dist/
+node_modules/

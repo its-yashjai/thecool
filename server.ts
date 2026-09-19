@@ -1,23 +1,21 @@
-import dotenv from 'dotenv';
-dotenv.config({ path: '.env.local' });
-
+import dotenv from "dotenv";
+// .env.local takes priority (Vite convention), then .env. Real environment variables win over both.
+dotenv.config({ path: ".env.local" });
+dotenv.config();
 import express from "express";
 import http from "http";
 import path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer as createViteServer } from "vite";
 import { SimulationEngine } from "./server/engine.js";
-import { MossEngine } from "./server/moss.js";
-import { VoiceDispatcher, getLiveKitCredentials, ensureClientsInitialized } from "./server/voice.js";
-
-ensureClientsInitialized();
-
-const livekitConfigured = !!process.env.LIVEKIT_API_KEY && !!process.env.LIVEKIT_API_SECRET;
-const openai = !!process.env.OPENAI_API_KEY;
+import { Retriever } from "./server/retrieval.js";
+import { VoiceDispatcher } from "./server/voice.js";
+import { createLiveKitToken, livekitConfigured, livekitRoomName } from "./server/livekit.js";
+import { llmStatus } from "./server/llm.js";
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
   const httpServer = http.createServer(app);
 
   app.use(express.json());
@@ -25,12 +23,28 @@ async function startServer() {
   // Simulation engine instance
   const engine = new SimulationEngine();
 
-  // Moss Sub-10ms Zero-Vector-DB Retrieval Engine
-  const moss = new MossEngine();
-  await moss.initialize();
+  // Retrieval: real Moss (in-process semantic search) with an honest local fallback.
+  // Initialisation runs in the background so the server starts immediately.
+  const retriever = new Retriever();
+  const printBanner = () => {
+    const r = retriever.status();
+    const l = llmStatus();
+    const moss =
+      r.mode === 'in-process' ? `Moss in-process (embeddings: ${r.embeddings ?? 'moss-managed'})`
+      : r.mode === 'cloud' ? 'Moss Cloud over network (in-process load failed)'
+      : r.configured ? 'LOCAL KEYWORD FALLBACK (Moss configured but unavailable)'
+      : 'LOCAL KEYWORD FALLBACK (Moss not configured)';
+    console.log('──────── NeuralFlow status ────────');
+    console.log(`Retrieval : ${moss}  [index: ${r.indexName}, docs: ${r.docCount}]`);
+    if (r.error) console.log(`            note: ${r.error}`);
+    console.log(`LiveKit   : ${livekitConfigured() ? 'real signed tokens, room ' + livekitRoomName() : 'NOT configured (local voice only)'}`);
+    console.log(`LLM       : ${l.configured ? `${l.model} via ${l.host} (open questions only)` : 'off - ' + l.reason}`);
+    console.log('───────────────────────────────────');
+  };
+  retriever.init().then(printBanner);
 
-  // Voice Operator & LiveKit Dispatcher
-  const voiceDispatcher = new VoiceDispatcher(moss);
+  // Voice dispatcher (deterministic intents, answers knowledge questions from retrieved docs; no LLM)
+  const voiceDispatcher = new VoiceDispatcher();
 
   // Precomputed baseline evaluation result
   let cachedBenchmark = SimulationEngine.runBatch("mixed", 600);
@@ -42,39 +56,51 @@ async function startServer() {
       tick: engine.tick,
       running: engine.running,
       ws_clients: wsServer.clients.size,
-      moss_status: "ready",
-      sub10ms_retrieval: true
+      retrieval: retriever.status(),
+      livekit: { configured: livekitConfigured(), room: livekitRoomName() },
+      llm: llmStatus()
     });
   });
 
-  // ── Moss Retrieval Engine Endpoints ─────────────────────────────
-  app.post("/api/moss/search", (req, res) => {
+  // ── Retrieval (Moss) Endpoints ──────────────────────────────────
+  app.post("/api/moss/search", async (req, res) => {
     const query = String(req.body.query || "");
-    const limit = Number(req.body.limit) || 4;
-    const result = moss.search(query, limit);
-    res.json(result);
+    const limit = Math.min(10, Math.max(1, Number(req.body.limit) || 4));
+    res.json(await retriever.search(query, limit));
   });
 
   app.get("/api/moss/documents", (_req, res) => {
-    res.json({
-      documents: moss.getAllDocuments(),
-      count: moss.getAllDocuments().length,
-      engine: "Moss Zero-Vector-DB (YC F25)"
-    });
+    const docs = retriever.getAllDocuments();
+    res.json({ documents: docs, count: docs.length, ...retriever.status() });
+  });
+
+  app.get("/api/moss/stats", (_req, res) => {
+    res.json({ status: retriever.status(), latency: retriever.stats() });
   });
 
   // ── LiveKit & Voice Operator Endpoints ──────────────────────────
   app.post("/api/voice/dispatch", async (req, res) => {
+    const t0 = process.hrtime.bigint();
     const transcript = String(req.body.transcript || "");
-    const response = await voiceDispatcher.processVoiceCommand(transcript, engine);
+    const participant = String(req.body.participant || "operator");
+    const mossResult = await retriever.search(transcript, 3);
+    const response = await voiceDispatcher.respond(transcript, engine, mossResult, participant);
+    const serverMs = Math.round((Number(process.hrtime.bigint() - t0) / 1_000_000) * 100) / 100;
+    response.livekitSession.latencyMs = serverMs;
+    response.timings = { retrievalMs: mossResult.latencyMs, serverMs, llmMs: response.timings?.llmMs };
     // If command modified engine state, broadcast to all listeners
     broadcast(engine.fullSnapshot());
     res.json(response);
   });
 
+  // Real LiveKit access token (JWT). Returns { configured: false } until the three env vars are set.
   app.get("/api/livekit/token", async (req, res) => {
-    const user = String(req.query.user || "operator");
-    res.json(await voiceDispatcher.getLiveKitToken(user));
+    try {
+      res.json(await createLiveKitToken(String(req.query.user || "operator")));
+    } catch (err: any) {
+      console.error("LiveKit token error:", err?.message ?? err);
+      res.status(500).json({ configured: true, reason: "Failed to create LiveKit token" });
+    }
   });
 
   app.get("/api/snapshot", (_req, res) => {
@@ -184,21 +210,25 @@ async function startServer() {
     });
   }
 
-httpServer.listen(PORT, "0.0.0.0", () => {
-    const mossMode = moss.isSdkReady() ? 'Real SDK (YC F25)' : 'Local fallback (model artifact auth pending)';
-    const livekitStatus = livekitConfigured ? 'real JWT' : 'demo mode';
-    const llmBaseUrl = process.env.LLM_BASE_URL || '';
-    const llmStatus = openai 
-      ? (llmBaseUrl.includes('groq') ? 'Groq (OpenAI-compat)' : 'OpenAI connected')
-      : 'regex fallback';
+  const shutdown = async () => {
+    await retriever.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 
-    console.log(`\n╔═════════════════════════════════════════════════════════════════════════════╗`);
-    console.log(`║  NeuralFlow — Physics-Informed GPU Thermal Intelligence                    ║`);
-    console.log(`║  Server running at http://0.0.0.0:${PORT}                                       ║`);
-    console.log(`║  WebSocket: ws://0.0.0.0:${PORT}/ws                                           ║`);
-    console.log(`║  Moss: ${moss.getAllDocuments().length} docs indexed • ${mossMode.padEnd(42)}║`);
-    console.log(`║  Voice: LiveKit ${livekitStatus.padEnd(10)} • LLM ${llmStatus.padEnd(18)}║`);
-    console.log(`╚═════════════════════════════════════════════════════════════════════════════╝\n`);
+  httpServer.on("error", (err: any) => {
+    if (err?.code === "EADDRINUSE") {
+      console.error(`Port ${PORT} is already in use. Stop the other process, or set PORT=3001 in .env.local.`);
+      process.exit(1);
+    }
+    throw err;
+  });
+
+  httpServer.listen(PORT, "0.0.0.0", () => {
+    console.log(`NeuralFlow server running at http://0.0.0.0:${PORT}`);
+    const l = llmStatus();
+    console.log(`LiveKit: ${livekitConfigured() ? 'configured' : 'not configured'} | LLM: ${l.configured ? l.model + ' via ' + l.host : 'off'} | Moss: initialising...`);
   });
 }
 
