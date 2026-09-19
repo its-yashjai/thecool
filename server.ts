@@ -62,6 +62,12 @@ async function startServer() {
     });
   });
 
+  app.get("/health", (_req, res) => {
+    res.status(200).json({
+      status: "ok"
+    });
+  });
+
   // ── Retrieval (Moss) Endpoints ──────────────────────────────────
   app.post("/api/moss/search", async (req, res) => {
     const query = String(req.body.query || "");
