@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { Room, RoomEvent, Track } from 'livekit-client';
 import { LiveSimulationState, VoiceAgentResponse, VoiceMessage, ClusterWarning, WorkloadParams, MossSearchResponse } from '../types';
+import { SileroVAD, createSileroVAD } from '../lib/sileroVAD';
 
 export type LiveKitStatus = 'idle' | 'connecting' | 'connected' | 'unconfigured' | 'error';
 
@@ -157,6 +158,12 @@ export const VoiceProvider: React.FC<{
   const accumulatedTranscriptRef = useRef<string>('');
   const noiseFloorRef = useRef<number>(-60); // dB, adaptive
   const lastVoiceAtRef = useRef<number>(0);
+  
+  // Silero VAD for accurate voice activity detection
+  const vadRef = useRef<SileroVAD | null>(null);
+  const vadInitializedRef = useRef(false);
+  const vadSpeechStartedRef = useRef(false);
+  const vadTurnEndTimerRef = useRef<number | null>(null);
 
   const [messages, setMessages] = useState<VoiceMessage[]>(() => {
     try {
@@ -494,7 +501,13 @@ export const VoiceProvider: React.FC<{
       }
       isRecognitionRunningRef.current = false;
 
-      // 2. Prepare speech synthesis
+      // 2. Reset VAD so it doesn't pick up AI's own voice
+      if (vadRef.current) {
+        vadRef.current.reset();
+      }
+      vadSpeechStartedRef.current = false;
+
+      // 3. Prepare speech synthesis
       window.speechSynthesis.cancel();
       if (window.speechSynthesis.paused) {
         window.speechSynthesis.resume();
@@ -527,6 +540,11 @@ export const VoiceProvider: React.FC<{
         // gives the user time to start their response
         setTimeout(() => {
           if (isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current) {
+            // Reset VAD again after AI finishes to clear any residual
+            if (vadRef.current) {
+              vadRef.current.reset();
+            }
+            vadSpeechStartedRef.current = false;
             startRecognition();
           }
         }, 600);
@@ -575,6 +593,11 @@ export const VoiceProvider: React.FC<{
     isSpeakingRef.current = false;
     (window as any).__currentVoiceUtterance = null;
     aiSpeechEndedAtRef.current = Date.now();
+    // Reset VAD when manually stopping speech
+    if (vadRef.current) {
+      vadRef.current.reset();
+    }
+    vadSpeechStartedRef.current = false;
     setTimeout(() => {
       if (isLiveKitConnectedRef.current && !isMutedRef.current) {
         startRecognition();
@@ -695,6 +718,75 @@ export const VoiceProvider: React.FC<{
         const freqData = new Uint8Array(analyser.frequencyBinCount);
         const timeData = new Uint8Array(analyserTime.fftSize);
 
+        // Initialize Silero VAD with Turn Detector for accurate voice activity + turn detection
+        if (!vadInitializedRef.current && audioStreamRef.current) {
+          try {
+            const vad = createSileroVAD({
+              sampleRate: 16000,
+              frameSize: 512,
+              threshold: 0.5,
+              minSpeechFrames: 3,
+              minSilenceFrames: 30,
+              speechPadFrames: 10,
+              // Turn detector settings - more sensitive to natural pauses
+              turnDetectionMinSpeechFrames: 5,
+              turnDetectionMinSilenceFrames: 40,
+              turnDetectionPaddingMs: 600,
+            });
+            await vad.init();
+            vad.setCallbacks(
+              (result) => {
+                // VAD result callback - track speech probability for UI
+                if (result.isSpeech && !vadSpeechStartedRef.current) {
+                  vadSpeechStartedRef.current = true;
+                }
+                // Use turn detection from VAD
+                if (result.isTurnEnd && !isSpeakingRef.current && !isDispatchingRef.current) {
+                  const currentInterim = interimTranscript.trim();
+                  if (currentInterim.length >= 4) {
+                    const isDuplicateRecent = (cand: string) => {
+                      const now = Date.now();
+                      if (now - lastDispatchTimeRef.current > 3000) return false;
+                      const c = cand.toLowerCase().trim();
+                      const last = lastDispatchedTextRef.current.toLowerCase().trim();
+                      return Boolean(last && c === last);
+                    };
+                    if (!isDuplicateRecent(currentInterim)) {
+                      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+                      setInterimTranscript('');
+                      setTranscript(currentInterim);
+                      dispatchVoiceRef.current(currentInterim);
+                    }
+                  }
+                }
+              },
+              () => {
+                // onSpeechStart
+                vadSpeechStartedRef.current = true;
+                lastVoiceAtRef.current = Date.now();
+              },
+              () => {
+                // onSpeechEnd - VAD detected end of speech segment
+                vadSpeechStartedRef.current = false;
+              },
+              () => {
+                // onTurnEnd - full turn detected (handled in result callback above)
+              }
+            );
+            
+            // Create a resampled stream for VAD (16kHz)
+            const vadContext = new (window.AudioContext || (window as any).webkitAudioContext)({
+              sampleRate: 16000
+            });
+            const vadSource = vadContext.createMediaStreamSource(audioStreamRef.current);
+            await vad.start(audioStreamRef.current);
+            vadRef.current = vad;
+            vadInitializedRef.current = true;
+          } catch (e) {
+            console.warn('Silero VAD init failed, continuing without:', e);
+          }
+        }
+
         let smoothLevel = 0;
 
         const updateVolume = () => {
@@ -755,6 +847,17 @@ export const VoiceProvider: React.FC<{
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
+    }
+    // Stop and cleanup Silero VAD
+    if (vadRef.current) {
+      vadRef.current.stop();
+      vadRef.current = null;
+    }
+    vadInitializedRef.current = false;
+    vadSpeechStartedRef.current = false;
+    if (vadTurnEndTimerRef.current) {
+      clearTimeout(vadTurnEndTimerRef.current);
+      vadTurnEndTimerRef.current = null;
     }
     sourceNodeRef.current = null;
     filterNodeRef.current = null;
