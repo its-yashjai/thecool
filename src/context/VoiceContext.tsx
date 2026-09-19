@@ -296,6 +296,13 @@ export const VoiceProvider: React.FC<{
       recognition.interimResults = true;
       recognition.lang = recognitionLanguageRef.current || (typeof navigator !== 'undefined' ? navigator.language : 'en-US') || 'en-US';
       recognition.maxAlternatives = 3;
+      // Tell the recognizer to wait longer for pauses (non-standard, Chrome supports)
+      // @ts-ignore - property may not exist on all implementations
+      recognition.speechStartThreshold = 0.3;   // lower = more sensitive to start
+      // @ts-ignore
+      recognition.speechEndThreshold = 0.15;    // lower = waits longer after speech ends
+      // @ts-ignore
+      recognition.silenceThreshold = 1500;      // ms of silence before ending (Chrome)
 
       recognition.onstart = () => {
         setIsListening(true);
@@ -339,13 +346,17 @@ export const VoiceProvider: React.FC<{
         finalPart = finalPart.trim().replace(/\s+/g, ' ');
         interimPart = interimPart.trim().replace(/\s+/g, ' ');
 
+        // Accumulate interim so we don't lose mid-sentence context
         if (interimPart) {
-          setInterimTranscript(interimPart);
+          setInterimTranscript(prev => {
+            const merged = (prev + ' ' + interimPart).trim().replace(/\s+/g, ' ');
+            return merged.length > 500 ? merged.slice(-500) : merged;
+          });
         }
 
         const isDuplicateRecent = (cand: string) => {
           const now = Date.now();
-          if (now - lastDispatchTimeRef.current > 2200) return false;
+          if (now - lastDispatchTimeRef.current > 3000) return false;
           const c = cand.toLowerCase().trim();
           const last = lastDispatchedTextRef.current.toLowerCase().trim();
           return Boolean(last && c === last);
@@ -356,12 +367,12 @@ export const VoiceProvider: React.FC<{
           // Use time-domain energy gate if available
           if (analyserTimeRef.current) {
             // checked via lastVoiceAtRef — updated in metering loop
-            return Date.now() - lastVoiceAtRef.current < 1800;
+            return Date.now() - lastVoiceAtRef.current < 2500;
           }
           // fallback to level threshold
           return micAudioLevel > 4;
         })();
-        const tooSoonAfterSpeech = Date.now() - aiSpeechEndedAtRef.current < 420;
+        const tooSoonAfterSpeech = Date.now() - aiSpeechEndedAtRef.current < 500;
         if (tooSoonAfterSpeech && !finalPart) return;
 
         // Require at least 2 words or 5 chars for noisy environments to avoid single-word hallucinations
@@ -387,19 +398,19 @@ export const VoiceProvider: React.FC<{
           return;
         }
 
-        // 2. Interim with adaptive silence debounce (longer in noisy conditions)
+        // 2. Interim with adaptive silence debounce (LONGER - wait for natural pauses)
         if (interimPart.length >= 4 && !finalPart) {
           if (!isValidUtterance(interimPart)) return;
-          // Adaptive timeout: 850ms when noisy, 650ms when quiet
+          // Much longer timeout: 2.5s noisy, 1.8s quiet, 1.2s if mic actively detecting voice
           const noiseFloor = noiseFloorRef.current;
           const isNoisy = noiseFloor > -42;
-          const debounceMs = isNoisy ? 900 : isMicActive ? 650 : 820;
+          const debounceMs = isNoisy ? 2500 : isMicActive ? 1800 : 2200;
           if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
           silenceTimerRef.current = setTimeout(() => {
             if (interimPart.length >= 4 && !isSpeakingRef.current) {
               if (!isDuplicateRecent(interimPart)) {
                 // Re-check mic activity at dispatch time
-                const stillActive = Date.now() - lastVoiceAtRef.current < 2000;
+                const stillActive = Date.now() - lastVoiceAtRef.current < 3000;
                 if (!stillActive && bestConfidence < 0.5) return;
                 setInterimTranscript('');
                 setTranscript(interimPart);
@@ -511,12 +522,14 @@ export const VoiceProvider: React.FC<{
         (window as any).__currentVoiceUtterance = null;
         aiSpeechEndedAtRef.current = Date.now();
 
-        // 250ms acoustic settle time after speech ends before restarting recognition
+        // 600ms acoustic settle time after speech ends before restarting recognition
+        // Longer delay prevents the agent's own voice from being picked up and also
+        // gives the user time to start their response
         setTimeout(() => {
           if (isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current) {
             startRecognition();
           }
-        }, 250);
+        }, 600);
       };
 
       utterance.onstart = () => {
@@ -566,7 +579,7 @@ export const VoiceProvider: React.FC<{
       if (isLiveKitConnectedRef.current && !isMutedRef.current) {
         startRecognition();
       }
-    }, 150);
+    }, 300);
   }, [startRecognition]);
 
   // Web Audio Stream setup — optimized for noise cancellation & accurate metering
