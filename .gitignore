@@ -1,0 +1,16 @@
+neuralflow_env/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+results/
+*.pt
+
+# deps / build
+node_modules/
+dist/
+bench/moss-results.json
+
+# secrets — never commit real keys
+.env
+.env.local
+.env.*.local
