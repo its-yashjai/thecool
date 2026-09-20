@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import MossToggle from './MossToggle';
 import {
   Mic,
   MicOff,
@@ -104,14 +105,13 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
   const [retrievalStats, setRetrievalStats] = useState<{ status: any; latency: any[] } | null>(null);
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/moss/stats')
-      .then((r) => r.json())
-      .then((d) => { if (!cancelled) setRetrievalStats(d); })
-      .catch(() => {});
-    return () => { cancelled = true; };
+    const load=()=>fetch('/api/moss/stats').then((r)=>r.json()).then((d)=>{ if(!cancelled) setRetrievalStats(d); }).catch(()=>{});
+    load();
+    window.addEventListener('neuralflow:retrieval-mode',load);
+    return () => { cancelled=true; window.removeEventListener('neuralflow:retrieval-mode',load); };
   }, [lastRetrieval]);
   const activeBackend: 'moss' | 'local' =
-    lastMossData?.backend ?? retrievalStats?.status?.activeBackend ?? 'local';
+    retrievalStats?.status?.activeBackend ?? lastMossData?.backend ?? 'local';
   const isMossBackend = activeBackend === 'moss';
   const backendStats = retrievalStats?.latency?.find((l: any) => l.backend === activeBackend);
   const roomLabel =
@@ -265,7 +265,8 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
               </p>
             </div>
           </div>
-          <div className="text-right">
+          <div className="text-right flex flex-col items-end gap-1.5">
+            <MossToggle variant="card" />
             {lastMossData && (
               <span className={`text-[10px] font-mono flex items-center gap-1 ${lastMossData.latencyMs < 10 ? 'text-emerald-400' : 'text-amber-400'}`}>
                 <CheckCircle2 className="w-3 h-3" /> {lastMossData.latencyMs < 10 ? 'Under 10 ms' : 'Over 10 ms'}
@@ -780,15 +781,7 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
                     Last turn: retrieval {lastTimings.retrievalMs} ms{lastTimings.llmMs !== undefined ? ` | LLM ${lastTimings.llmMs} ms` : ''} | server {lastTimings.serverMs} ms | browser round trip {lastTimings.roundTripMs} ms
                   </div>
                 )}
-                {(!isMossBackend || retrievalStats?.status?.mode === 'cloud') && (
-                  <div className="text-amber-400">
-                    {retrievalStats?.status?.error
-                      ? `${retrievalStats.status.state === 'cloud' ? 'Moss note' : 'Moss unavailable'}: ${retrievalStats.status.error}`
-                      : retrievalStats?.status?.configured
-                      ? 'Moss is still starting up...'
-                      : 'Moss credentials not set. Add MOSS_PROJECT_ID and MOSS_PROJECT_KEY to .env.'}
-                  </div>
-                )}
+                {/* errors hidden — toggle handles backend silently */}
               </div>
             </div>
 

@@ -33,6 +33,8 @@ export interface RetrieverStatus {
   indexName: string;
   docCount: number;
   error?: string;
+  forceLocal: boolean;
+  mossAvailable: boolean;
   /** Where embeddings come from: Moss's own model, or our local model (bring-your-own vectors). */
   embeddings?: string;
 }
@@ -81,6 +83,7 @@ export class Retriever {
   private retryTimer: NodeJS.Timeout | null = null;
   private reinitTimer: NodeJS.Timeout | null = null;
   private initializing = false;
+  private forceLocal = process.env.RETRIEVAL_FORCE_LOCAL === '1';
   private embedder: Embedder | null = null;
   private readonly localEmbeddings: boolean;
 
@@ -109,12 +112,16 @@ export class Retriever {
     return Boolean(this.projectId && this.projectKey);
   }
 
+  setForceLocal(v:boolean){ this.forceLocal=v; }
   status(): RetrieverStatus {
+    const mossAvailable = this.state==='ready'||this.state==='cloud';
     return {
       configured: this.configured,
       state: this.state,
-      activeBackend: this.state === 'ready' || this.state === 'cloud' ? 'moss' : 'local',
-      mode: this.mode(),
+      activeBackend: mossAvailable && !this.forceLocal ? 'moss' : 'local',
+      mode: this.forceLocal? 'local': this.mode(),
+      forceLocal: this.forceLocal,
+      mossAvailable,
       indexName: this.indexName,
       docCount: this.docs.length,
       error: this.error,
@@ -308,7 +315,7 @@ export class Retriever {
   }
 
   async search(query: string, limit = 3): Promise<MossSearchResponse> {
-    if ((this.state === 'ready' || this.state === 'cloud') && this.client) {
+    if (!this.forceLocal && (this.state === 'ready' || this.state === 'cloud') && this.client) {
       const t0 = process.hrtime.bigint();
       try {
         let embedMs: number | undefined;
@@ -362,6 +369,7 @@ export class Retriever {
 
     const local = this.local.search(query, limit);
     this.record('local', local.latencyMs);
+    if(this.forceLocal) local.retrievalEngine='Local keyword index (Moss switched off)';
     return local;
   }
 
@@ -406,5 +414,8 @@ function sanitize(err: any): string {
   for (const secret of [process.env.MOSS_PROJECT_KEY, process.env.MOSS_PROJECT_ID]) {
     if (secret) msg = msg.split(secret).join('***');
   }
-  return msg.slice(0, 300);
+  msg = msg.replace(/https?:\/\/\S+/g,'').replace(/\s{2,}/g,' ').trim();
+  if(/credit_exhausted|USAGE_LIMIT_EXCEEDED|429/i.test(msg)) return 'Moss quota exceeded — using local search';
+  if(/401|unauthorized|forbidden/i.test(msg)) return 'Moss auth failed — using local search';
+  return msg.slice(0,200);
 }

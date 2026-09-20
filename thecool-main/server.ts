@@ -80,6 +80,20 @@ async function startServer() {
     res.json({ documents: docs, count: docs.length, ...retriever.status() });
   });
 
+  app.get("/api/retrieval/mode",(_req,res)=>res.json(retriever.status()));
+  app.post("/api/retrieval/mode",(req,res)=>{
+    const b=req.body??{};
+    let forceLocal: boolean|undefined;
+    if(typeof b.forceLocal==="boolean") forceLocal=b.forceLocal;
+    else if(b.mode==="local") forceLocal=true;
+    else if(b.mode==="moss") forceLocal=false;
+    if(forceLocal===undefined) return res.status(400).json({error:'send { "forceLocal": true|false }'});
+    const st=retriever.status();
+    if(!forceLocal && !st.mossAvailable) return res.status(409).json({error:"moss-unavailable",reason:st.error||"Moss not ready",...st});
+    retriever.setForceLocal(forceLocal);
+    console.log(`[retrieval] ${forceLocal?"Moss OFF":"Moss ON"} via toggle`);
+    res.json(retriever.status());
+  });
   app.get("/api/moss/stats", (_req, res) => {
     res.json({ status: retriever.status(), latency: retriever.stats() });
   });
