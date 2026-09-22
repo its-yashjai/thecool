@@ -3,7 +3,7 @@
 **Physics-Informed Neural Network for proactive GPU thermal management.**  
 Replaces reactive PID cooling with a PINN that predicts temperature spikes 30–60s ahead, eliminating thermal throttling and saving ~13% cooling energy.
 
-**Author:** [Yash Jai](https://github.com/its-yashjai) (`yashjaimail@gmail.com`)  
+**Author:** [Yash Jaiswal](https://github.com/its-yashjai) (`yashjaimail@gmail.com`)  
 **Repository:** [its-yashjai/thecool](https://github.com/its-yashjai/thecool)  
 **License:** MIT License  
 
