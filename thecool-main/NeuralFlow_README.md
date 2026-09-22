@@ -704,6 +704,23 @@ The objective is simple:
 
 ---
 
+## Deploy to Render
+
+This `v7` (`Y:/v7neuralflow/thecool-main`, branch `v7`) is deploy-ready. `v5` (`Y:/v5`) stays untouched.
+
+**Render settings:** Root Directory `thecool-main` (or repo root with `render.yaml`), Build `npm ci && npm run build`, Start `npm start`, Health `/health`, Node 20.
+
+**Env vars (Dashboard → Environment):** `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY` (rotate anytime), `MOSS_INDEX_NAME=neuralflow-kb`, `MOSS_EMBEDDINGS=local`, `LIVEKIT_*`, `LLM_API_KEY/BASE_URL/MODEL=gemini-3.6-flash`. If quota hits `429 credit_exhausted` app shows `Local fallback` honestly.
+
+```bash
+curl https://your-app.onrender.com/api/health
+curl https://your-app.onrender.com/api/moss/stats
+```
+
+If `npm ci` fails with `EUSAGE` (no `package-lock.json`), ensure Render **Root Directory = thecool-main** (where `package-lock.json` lives) — do not use repo root.
+
+---
+
 ## NEURALFLOW
 
 ### Predict the heat. Protect the compute. Operate with context.
