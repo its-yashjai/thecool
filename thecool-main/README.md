@@ -41,20 +41,6 @@ This `v7neuralflow` clone is deploy-ready. `v5` (`Y:/v5`) is not modified or pus
 - **Node:** `20.x` (auto via `package.json` `tsx`)
 - **Health Check:** `/health` → `{"status":"ok"}`
 
-**Environment variables (Render Dashboard → Environment → Add):**
-
-```
-MOSS_PROJECT_ID=c6966a01-c5e6-4a40-9609-60009e4da5af   # or new project
-MOSS_PROJECT_KEY=moss_...                             # ← rotate here anytime; no code change needed
-MOSS_INDEX_NAME=neuralflow-kb
-MOSS_EMBEDDINGS=local
-LIVEKIT_URL=wss://ycc-toobrjpd.livekit.cloud
-LIVEKIT_API_KEY=APIe4BBhP5nEyx3
-LIVEKIT_API_SECRET=mrbkt5I3f4L60YljAr0pTRoybRVJsHeQSwebuvpdeleG
-LLM_API_KEY=sk-sCgMQUoBpKoF3QfM1_-UV9iQXpW1XPiBmpASI9XeZ0I
-LLM_BASE_URL=https://llm.hidevs.xyz/v1
-LLM_MODEL=gemini-3.6-flash
-```
 
 > **Moss key rotation:** Change `MOSS_PROJECT_KEY` (and `MOSS_PROJECT_ID` if you create a new Moss project) directly in Render → Environment → Save → Manual Deploy. The app re-creates/syncs the `neuralflow-kb` index on boot; existing docs are upserted, never deleted. If quota is exhausted you will see `LOCAL KEYWORD FALLBACK (Moss configured but unavailable)` in logs — the app still answers honestly as `Local` (fixed in `server/voice.ts:221`).
 
