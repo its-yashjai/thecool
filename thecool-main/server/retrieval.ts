@@ -83,6 +83,7 @@ export class Retriever {
   private initializing = false;
   private embedder: Embedder | null = null;
   private readonly localEmbeddings: boolean;
+  private forcedBackend: 'auto' | 'moss' | 'local' = 'auto';
 
   readonly indexName: string;
   private readonly projectId: string | undefined;
@@ -109,16 +110,29 @@ export class Retriever {
     return Boolean(this.projectId && this.projectKey);
   }
 
-  status(): RetrieverStatus {
+  getForcedBackend(): 'auto' | 'moss' | 'local' {
+    return this.forcedBackend;
+  }
+
+  setForcedBackend(mode: 'auto' | 'moss' | 'local'): void {
+    this.forcedBackend = mode;
+  }
+
+  status(): RetrieverStatus & { forcedBackend: 'auto' | 'moss' | 'local' } {
+    const naturalBackend: 'moss' | 'local' = this.state === 'ready' || this.state === 'cloud' ? 'moss' : 'local';
+    const activeBackend = this.forcedBackend !== 'auto' ? this.forcedBackend : naturalBackend;
+    // When forced to moss but not ready, mode stays as natural until ready; forced local always shows local
+    const effectiveMode = this.forcedBackend === 'local' ? 'local' : this.forcedBackend === 'moss' && naturalBackend === 'local' ? 'local' : this.mode();
     return {
       configured: this.configured,
       state: this.state,
-      activeBackend: this.state === 'ready' || this.state === 'cloud' ? 'moss' : 'local',
-      mode: this.mode(),
+      activeBackend,
+      mode: effectiveMode as RetrievalMode,
       indexName: this.indexName,
       docCount: this.docs.length,
       error: this.error,
       embeddings: this.localEmbeddings ? (this.embedder?.name ?? 'local (loading...)') : 'moss-managed',
+      forcedBackend: this.forcedBackend,
     };
   }
 
@@ -308,6 +322,12 @@ export class Retriever {
   }
 
   async search(query: string, limit = 3): Promise<MossSearchResponse> {
+    // Manual Retrieval Mode override: forced 'local' bypasses Moss entirely
+    if (this.forcedBackend === 'local') {
+      const local = this.local.search(query, limit);
+      this.record('local', local.latencyMs);
+      return local;
+    }
     if ((this.state === 'ready' || this.state === 'cloud') && this.client) {
       const t0 = process.hrtime.bigint();
       try {

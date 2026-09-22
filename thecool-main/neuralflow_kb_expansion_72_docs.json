@@ -1,0 +1,889 @@
+[
+  {
+    "id": "HW-RACK-AIRFLOW-01",
+    "title": "Rack Airflow Baseline",
+    "category": "hardware",
+    "content": "The 3×3 NeuralFlow rack has strongest airflow at perimeter positions. During sustained bursts, interior GPUs can accumulate heat faster, so workload balancing should consider airflow position as well as temperature.",
+    "tags": [
+      "rack",
+      "airflow",
+      "perimeter",
+      "3x3"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "HW-GPU04-POSITION",
+    "title": "GPU-04 Thermal Position",
+    "category": "hardware",
+    "content": "GPU-04 is the recurring thermal hotspot in the reference 3×3 cluster. When it rises faster than neighbors, investigate workload placement and local airflow before simply increasing every fan.",
+    "tags": [
+      "GPU-04",
+      "hotspot",
+      "cluster",
+      "airflow"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "HW-H100-THERMAL",
+    "title": "H100-SXM5 Thermal Envelope",
+    "category": "hardware",
+    "content": "The NeuralFlow reference profile records 700 W TDP for the H100-SXM5 and uses 85°C as the throttling threshold in the simulated control policy.",
+    "tags": [
+      "H100",
+      "700W",
+      "85C",
+      "throttle"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "HW-H200-THERMAL",
+    "title": "H200 Thermal Envelope",
+    "category": "hardware",
+    "content": "The NeuralFlow reference profile treats the H200 with the same 85°C thermal throttle boundary used by the reference control policy and models it as a high-power accelerator requiring proactive cooling under sustained load.",
+    "tags": [
+      "H200",
+      "85C",
+      "proactive cooling"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "HW-A100-THERMAL",
+    "title": "A100 Reference Profile",
+    "category": "hardware",
+    "content": "The A100 reference profile uses 400 W TDP in the simulator. It is modeled as a lower-power accelerator than the H100/H200 profiles but still benefits from early cooling when the predicted trajectory is rising.",
+    "tags": [
+      "A100",
+      "400W",
+      "forecast"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "HW-B200-NVL",
+    "title": "B200-NVL Reference Profile",
+    "category": "hardware",
+    "content": "The NeuralFlow reference profile models the B200-NVL at 1000 W and assumes liquid-cooling support. Its control profile uses an 82°C maximum die-delta guardrail before emergency override behavior.",
+    "tags": [
+      "B200",
+      "1000W",
+      "liquid cooling",
+      "82C"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "HW-CLUSTER-3X3-EDGE",
+    "title": "3×3 Edge GPU Behavior",
+    "category": "hardware",
+    "content": "Perimeter GPUs in the 3×3 cluster generally have better airflow access than interior positions. During a rising thermal gradient, moving suitable workload toward cooler perimeter nodes can reduce localized heat concentration.",
+    "tags": [
+      "3x3",
+      "perimeter",
+      "workload placement"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "HW-FAN-CUBE-LAW",
+    "title": "Fan Power Relationship",
+    "category": "hardware",
+    "content": "The reference model uses a fan-power relationship that grows approximately with the cube of fan speed. This makes prolonged high-speed fan operation disproportionately expensive compared with moderate proactive cooling.",
+    "tags": [
+      "fan power",
+      "cube law",
+      "energy"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "HW-THERMAL-INERTIA",
+    "title": "Thermal Inertia Reference",
+    "category": "hardware",
+    "content": "Heat sinks and coolant do not react instantaneously to a change in GPU power. The control model therefore treats temperature as a delayed physical response and values early intervention based on predicted heat rather than only current measurements.",
+    "tags": [
+      "thermal inertia",
+      "forecast",
+      "cooling"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "HW-POWER-WORKLOAD",
+    "title": "Workload-to-Power Mapping",
+    "category": "hardware",
+    "content": "The reference simulator maps AI request rate and workload intensity to GPU power. In the baseline model, power rises from roughly 280 W at idle toward about 650 W under burst conditions.",
+    "tags": [
+      "workload",
+      "power",
+      "650W",
+      "280W"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "HW-SENSOR-LAG",
+    "title": "Sensor Response Profile",
+    "category": "hardware",
+    "content": "The reference simulation assumes that sensor-driven reactive control can observe a rapidly rising thermal state only after some physical and measurement delay. This lag is one reason predictive control starts cooling earlier.",
+    "tags": [
+      "sensor lag",
+      "thermal response",
+      "reactive"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "HW-COOLING-HEADROOM",
+    "title": "Cooling Headroom Concept",
+    "category": "hardware",
+    "content": "Cooling headroom is the gap between current thermal state and the temperature at which stronger protective action becomes necessary. NeuralFlow preserves headroom by responding to forecasted risk before the system reaches the hard limit.",
+    "tags": [
+      "headroom",
+      "thermal margin",
+      "forecast"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-06-PREEMPTIVE-COOLING",
+    "title": "Preemptive Cooling Before a Rapid Rise",
+    "category": "runbook",
+    "content": "When the forecast indicates temperature is rising quickly, increase cooling before the measured temperature enters the throttle zone. The purpose is to absorb thermal inertia and prevent the system from arriving at the limit with no remaining control margin.",
+    "tags": [
+      "preemptive",
+      "cooling",
+      "forecast",
+      "thermal inertia"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-07-HOTSPOT-CONTAINMENT",
+    "title": "Hotspot Containment",
+    "category": "runbook",
+    "content": "If one GPU becomes noticeably hotter than its peers, identify whether the cause is workload concentration or airflow asymmetry. Contain the hotspot with targeted fan response and, where policy allows, shift workload toward cooler perimeter GPUs.",
+    "tags": [
+      "hotspot",
+      "GPU",
+      "workload shift",
+      "airflow"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-08-GRADUAL-RECOVERY",
+    "title": "Gradual Recovery After a Burst",
+    "category": "runbook",
+    "content": "After a high-load interval ends, reduce fan speed in controlled steps rather than returning immediately to baseline. This avoids a thermal rebound caused by stored heat in the heatsink and coolant path.",
+    "tags": [
+      "recovery",
+      "fan",
+      "thermal rebound"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-09-PID-WINDUP-CHECK",
+    "title": "PID Windup Investigation",
+    "category": "runbook",
+    "content": "When reactive PID keeps fans elevated after a thermal event has passed, inspect integral windup and delayed feedback. Avoid compensating for lag with excessive sustained actuation.",
+    "tags": [
+      "PID",
+      "windup",
+      "feedback",
+      "overcooling"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-10-CLUSTER-REDISTRIBUTION",
+    "title": "Cluster Workload Redistribution",
+    "category": "runbook",
+    "content": "When a single GPU is persistently hotter than adjacent nodes, redistribute suitable workload toward cooler cluster positions instead of forcing every fan to maximum speed.",
+    "tags": [
+      "cluster",
+      "redistribution",
+      "GPU-04",
+      "workload"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-11-FORECAST-CHECK",
+    "title": "Forecast Validation Before Escalation",
+    "category": "runbook",
+    "content": "Before escalating cooling aggressively, check whether the predicted trajectory remains above the relevant threshold across multiple forecast points. A single noisy prediction should not cause repeated large control changes.",
+    "tags": [
+      "forecast",
+      "validation",
+      "noise",
+      "control"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-12-BURST-ENTRY",
+    "title": "Burst Entry Procedure",
+    "category": "runbook",
+    "content": "When a high-demand workload is about to begin, establish cooling headroom before the power ramp. Pre-ramping fans is preferred to waiting for temperature to cross a threshold after the workload is already active.",
+    "tags": [
+      "burst",
+      "pre-ramp",
+      "headroom"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-13-BURST-EXIT",
+    "title": "Burst Exit Procedure",
+    "category": "runbook",
+    "content": "When a burst completes, hold the cooling state briefly and then step fans down gradually. Confirm that predicted temperature is stabilizing before returning to baseline fan speed.",
+    "tags": [
+      "burst",
+      "exit",
+      "fan",
+      "recovery"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-14-FORECAST-OVERRIDE",
+    "title": "Forecast-Based Override Procedure",
+    "category": "runbook",
+    "content": "If the forecast crosses the emergency override level, bypass normal gradual cooling behavior and apply the emergency control policy. The forecast can trigger protective action before physical temperature reaches the same level.",
+    "tags": [
+      "override",
+      "forecast",
+      "emergency"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-15-VOICE-SAFE-CONTROL",
+    "title": "Voice Control Safety Procedure",
+    "category": "runbook",
+    "content": "Voice commands may request fan changes within the allowed range, but emergency protection cannot be disabled by voice. Safety guardrails remain authoritative over operator convenience.",
+    "tags": [
+      "voice",
+      "safety",
+      "fan",
+      "guardrails"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-16-RECHECK-AFTER-ACTION",
+    "title": "Post-Action Verification",
+    "category": "runbook",
+    "content": "After any cooling or workload control action, re-check temperature, fan speed, workload, and forecast. The action is successful only if the thermal trajectory responds as intended.",
+    "tags": [
+      "verification",
+      "telemetry",
+      "forecast"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-17-SUSTAINED-LOAD",
+    "title": "Sustained High-Load Procedure",
+    "category": "runbook",
+    "content": "For workloads that remain elevated for several minutes, favor stable fan control and workload distribution rather than repeated rapid changes. Continuous oscillation can waste energy without improving thermal stability.",
+    "tags": [
+      "sustained load",
+      "oscillation",
+      "energy"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-18-SENSOR-MISMATCH",
+    "title": "Sensor Mismatch Investigation",
+    "category": "runbook",
+    "content": "If sensor readings disagree with the expected thermal trajectory, compare neighboring GPU sensors and recent workload changes. Do not automatically assume the hottest value is a hardware failure without corroboration.",
+    "tags": [
+      "sensor",
+      "mismatch",
+      "diagnostic"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-19-LOW-AIRFLOW",
+    "title": "Low Airflow Investigation",
+    "category": "runbook",
+    "content": "When temperature rises without a proportional workload increase, inspect airflow distribution and local fan behavior. A localized airflow restriction can create a hotspot even when cluster-wide power is stable.",
+    "tags": [
+      "airflow",
+      "hotspot",
+      "diagnostic"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-20-ENERGY-AWARE-COOLING",
+    "title": "Energy-Aware Cooling Procedure",
+    "category": "runbook",
+    "content": "When thermal risk is low and the forecast is stable, avoid unnecessary maximum fan speed. The objective is to maintain safe thermal margins while minimizing avoidable fan power.",
+    "tags": [
+      "energy",
+      "cooling",
+      "efficiency"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "RB-21-POST-THROTTLE-RECOVERY",
+    "title": "Post-Throttle Recovery",
+    "category": "runbook",
+    "content": "After a throttle event, record the trigger condition, peak temperature, workload state, and cooling response. Use the incident data to determine whether intervention should begin earlier on subsequent runs.",
+    "tags": [
+      "throttle",
+      "recovery",
+      "incident",
+      "learning"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "GD-03-FAN-RANGE",
+    "title": "Voice Fan Command Range",
+    "category": "guardrail",
+    "content": "Voice-requested fan speeds are clamped to the permitted operating range of 20–100%. The safety controller remains authoritative if a requested value conflicts with emergency policy.",
+    "tags": [
+      "fan",
+      "voice",
+      "20%",
+      "100%"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "GD-04-PRECOOL",
+    "title": "Pre-Cool Threshold",
+    "category": "guardrail",
+    "content": "The reference NeuralFlow policy begins proactive cooling at 74°C or when the forecast indicates that the 60-second horizon will cross the pre-cool threshold.",
+    "tags": [
+      "74C",
+      "pre-cool",
+      "forecast"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "GD-05-OVERRIDE",
+    "title": "Thermal Override Threshold",
+    "category": "guardrail",
+    "content": "An 82°C forecast or measured control condition triggers stronger override behavior in the reference policy, before the 85°C throttle point.",
+    "tags": [
+      "82C",
+      "override",
+      "protection"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "GD-06-THROTTLE",
+    "title": "Throttle Threshold",
+    "category": "guardrail",
+    "content": "The reference control policy treats 85°C as the thermal point associated with GPU throttling.",
+    "tags": [
+      "85C",
+      "throttle"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "GD-07-SHUTDOWN",
+    "title": "Critical Shutdown Threshold",
+    "category": "guardrail",
+    "content": "The reference control policy uses 90°C as the critical shutdown threshold for the simulated environment.",
+    "tags": [
+      "90C",
+      "shutdown",
+      "critical"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "GD-08-FORECAST-CONFIDENCE",
+    "title": "Forecast Confidence Guardrail",
+    "category": "guardrail",
+    "content": "Control escalation should consider prediction confidence. When uncertainty is unusually high, inspect recent trajectory and supporting telemetry instead of blindly escalating every response.",
+    "tags": [
+      "uncertainty",
+      "confidence",
+      "forecast"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "GD-09-EMERGENCY-NO-DISABLE",
+    "title": "Emergency Protection Cannot Be Disabled by Voice",
+    "category": "guardrail",
+    "content": "A voice instruction cannot disable emergency thermal protection. Operational requests remain subordinate to controller safety limits.",
+    "tags": [
+      "voice",
+      "emergency",
+      "safety"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "GD-10-RATE-LIMIT",
+    "title": "Control Change Rate Limit",
+    "category": "guardrail",
+    "content": "Avoid rapid repeated control changes when measured and forecast temperatures are stable. Rate limiting reduces actuator chatter and makes thermal control easier to audit.",
+    "tags": [
+      "rate limit",
+      "control",
+      "oscillation"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "GD-11-CLUSTER-SAFETY",
+    "title": "Cluster-Wide Safety Precedence",
+    "category": "guardrail",
+    "content": "Cluster-level protective rules take precedence over local optimization. A cool GPU cannot justify an action that causes another GPU to cross a safety threshold.",
+    "tags": [
+      "cluster",
+      "safety",
+      "precedence"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "GD-12-AUDIT",
+    "title": "Control Audit Requirement",
+    "category": "guardrail",
+    "content": "Every automated or voice-triggered control action should retain its command, timestamp, resulting state, and retrieval or decision context so operators can reconstruct why the system acted.",
+    "tags": [
+      "audit",
+      "control",
+      "traceability"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-01",
+    "title": "LLaMA Batch Thermal Spike",
+    "category": "incident",
+    "content": "Synthetic historical incident: a LLaMA-3 batch workload drove the reference cluster to 84.2°C under reactive PID control, with 7 recorded throttle events. The corresponding NeuralFlow simulation held the peak near 71°C with 0 throttle events.",
+    "tags": [
+      "LLaMA-3",
+      "84.2C",
+      "71C",
+      "PID",
+      "throttle"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-02",
+    "title": "GPU-04 Hotspot During API Surge",
+    "category": "incident",
+    "content": "Synthetic historical incident: API traffic rose rapidly while most GPUs remained near baseline. GPU-04 became the hottest node because workload placement and airflow were uneven. Corrective action was workload redistribution plus targeted cooling.",
+    "tags": [
+      "GPU-04",
+      "API",
+      "hotspot",
+      "redistribution"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-03",
+    "title": "PID Oscillation After Burst",
+    "category": "incident",
+    "content": "Synthetic historical incident: reactive PID repeatedly raised and lowered fan speed after a short burst. Temperature was safe, but fan actuation oscillated and consumed unnecessary energy. The lesson was to account for thermal lag before changing control gain.",
+    "tags": [
+      "PID",
+      "oscillation",
+      "fan",
+      "energy"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-04",
+    "title": "Late Fan Ramp",
+    "category": "incident",
+    "content": "Synthetic historical incident: workload power increased rapidly while fan speed stayed near baseline until measured temperature rose sharply. The control team concluded that waiting for a sensor threshold left too little thermal headroom.",
+    "tags": [
+      "fan ramp",
+      "sensor lag",
+      "headroom"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-05",
+    "title": "False Hotspot Signal",
+    "category": "incident",
+    "content": "Synthetic historical incident: one telemetry channel briefly reported a temperature spike that neighboring sensors did not confirm. The system avoided an aggressive cluster-wide response by checking the broader telemetry pattern first.",
+    "tags": [
+      "sensor",
+      "false positive",
+      "telemetry"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-06",
+    "title": "Overcooling During Stable Load",
+    "category": "incident",
+    "content": "Synthetic historical incident: fan speed remained high after workload stabilized because the controller responded to an earlier spike. Energy use rose without meaningful temperature benefit. Remediation was gradual recovery logic.",
+    "tags": [
+      "overcooling",
+      "recovery",
+      "energy"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-07",
+    "title": "Workload Shift Prevented Cluster Escalation",
+    "category": "incident",
+    "content": "Synthetic historical incident: moving part of a hot GPU workload to cooler perimeter nodes reduced local thermal gradient without requiring all fans to run at maximum speed.",
+    "tags": [
+      "workload shift",
+      "perimeter",
+      "thermal gradient"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-08",
+    "title": "Predictive Intervention Before Threshold",
+    "category": "incident",
+    "content": "Synthetic historical incident: NeuralFlow increased cooling after the forecast began trending upward even though current temperature was below the pre-cool threshold. The early response preserved more thermal headroom than the reactive baseline.",
+    "tags": [
+      "forecast",
+      "pre-cool",
+      "headroom"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-09",
+    "title": "Emergency Forecast Override",
+    "category": "incident",
+    "content": "Synthetic historical incident: a sustained workload produced a forecast above the emergency override level. Protection logic escalated cooling before measured temperature reached the same value, preventing a projected throttle event in simulation.",
+    "tags": [
+      "forecast",
+      "override",
+      "throttle"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-10",
+    "title": "Recovery Ramp Too Fast",
+    "category": "incident",
+    "content": "Synthetic historical incident: fans were reduced too quickly after a workload drop, and stored heat caused a secondary temperature rise. The recovery runbook was updated to step fans down more slowly.",
+    "tags": [
+      "recovery",
+      "thermal rebound",
+      "fan"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-11",
+    "title": "Cooling Saved Energy During Stable Period",
+    "category": "incident",
+    "content": "Synthetic historical incident: after the forecast returned to a stable low-risk state, fan speed was reduced gradually. The reference simulation maintained the safety margin while reducing fan power versus holding fans near maximum.",
+    "tags": [
+      "energy",
+      "stable",
+      "fan"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-12",
+    "title": "Cluster Balance During Mixed Workload",
+    "category": "incident",
+    "content": "Synthetic historical incident: AI and API workloads were distributed unevenly across the rack, creating a temperature difference between nodes. Rebalancing reduced the spread and improved cluster-wide thermal stability.",
+    "tags": [
+      "mixed workload",
+      "cluster balance",
+      "temperature spread"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-13",
+    "title": "Voice Command Guardrail Test",
+    "category": "incident",
+    "content": "Synthetic test incident: an operator voice request attempted to push fan control outside the permitted range. The safety layer clamped the request and retained emergency protections.",
+    "tags": [
+      "voice",
+      "guardrail",
+      "fan"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "INC-2026-14",
+    "title": "Retrieval-Grounded Intervention Review",
+    "category": "incident",
+    "content": "Synthetic review incident: an operator asked why a previous cooling action occurred. Retrieval surfaced the relevant runbook and incident context, allowing the LLM to explain the decision without changing simulator state.",
+    "tags": [
+      "retrieval",
+      "runbook",
+      "audit",
+      "explanation"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "SIM-01-BURST-PROFILE",
+    "title": "Reference Burst Workload",
+    "category": "simulation",
+    "content": "Synthetic simulation profile: workload rises from a stable baseline into a high-demand burst, power increases with load, and temperature responds after a physical delay. The scenario tests whether proactive cooling starts early enough.",
+    "tags": [
+      "burst",
+      "power",
+      "temperature",
+      "delay"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "SIM-02-RISING-FORECAST",
+    "title": "Rising Forecast Scenario",
+    "category": "simulation",
+    "content": "Synthetic scenario: current temperature remains below the danger zone while the 60-second forecast trends upward. Desired behavior is early intervention instead of waiting for the current value to cross the limit.",
+    "tags": [
+      "forecast",
+      "60s",
+      "early intervention"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "SIM-03-HOT-GPU",
+    "title": "Single-GPU Hotspot Scenario",
+    "category": "simulation",
+    "content": "Synthetic scenario: GPU-04 receives a disproportionate workload share while neighbors remain cooler. The test evaluates workload redistribution and localized cooling.",
+    "tags": [
+      "GPU-04",
+      "hotspot",
+      "redistribution"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "SIM-04-RECOVERY",
+    "title": "Cooling Recovery Scenario",
+    "category": "simulation",
+    "content": "Synthetic scenario: workload falls sharply after a burst. Correct response is controlled fan recovery followed by verification that temperature continues declining.",
+    "tags": [
+      "recovery",
+      "fan",
+      "workload drop"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "SIM-05-PID-BASELINE",
+    "title": "Reactive PID Baseline Scenario",
+    "category": "simulation",
+    "content": "Synthetic baseline scenario: PID reacts to measured temperature after the rise is visible. Comparison evaluates overshoot, throttle events, and energy use rather than final temperature alone.",
+    "tags": [
+      "PID",
+      "baseline",
+      "overshoot"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "SIM-06-NF-PREDICTIVE",
+    "title": "NeuralFlow Predictive Scenario",
+    "category": "simulation",
+    "content": "Synthetic scenario: controller uses forecast trajectory to begin cooling before measured temperature reaches a critical band. Expected benefit is more thermal headroom and fewer emergency interventions.",
+    "tags": [
+      "NeuralFlow",
+      "predictive",
+      "headroom"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "SIM-07-LOAD-STEP",
+    "title": "Workload Step Test",
+    "category": "simulation",
+    "content": "Synthetic step test: workload changes abruptly from moderate to high. Evaluate reaction time, fan ramp, peak temperature, and recovery between controllers.",
+    "tags": [
+      "workload step",
+      "fan ramp",
+      "comparison"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "SIM-08-UNCERTAINTY",
+    "title": "Forecast Uncertainty Scenario",
+    "category": "simulation",
+    "content": "Synthetic scenario: predicted temperature rises while uncertainty is high. Test whether the system uses supporting telemetry and avoids unstable repeated control changes.",
+    "tags": [
+      "uncertainty",
+      "forecast",
+      "control"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "REF-22-PREDICTIVE-CONTROL",
+    "title": "Predictive Control Principle",
+    "category": "engineering",
+    "content": "NeuralFlow treats future temperature as a control signal rather than waiting for the current sensor value to become unsafe. This shifts cooling from reactive correction toward proactive intervention.",
+    "tags": [
+      "predictive control",
+      "future temperature",
+      "proactive"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "REF-23-THERMAL-MARGIN",
+    "title": "Thermal Margin",
+    "category": "engineering",
+    "content": "Thermal margin is the remaining space between current or forecast temperature and the next protective threshold. Preserving margin gives the controller more time to respond before throttling becomes unavoidable.",
+    "tags": [
+      "thermal margin",
+      "headroom"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "REF-24-REACTIVE-LAG",
+    "title": "Why Reactive Cooling Lags",
+    "category": "engineering",
+    "content": "Reactive cooling waits for visible temperature response before changing control. Silicon, heatsinks, sensors, and actuators introduce delays, so the sequence can arrive after the thermal trajectory is already difficult to reverse.",
+    "tags": [
+      "reactive",
+      "lag",
+      "sensor",
+      "actuator"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "REF-25-FAN-ENERGY",
+    "title": "Fan Energy Scaling",
+    "category": "engineering",
+    "content": "The reference model emphasizes that fan energy rises steeply with fan speed. Maintaining moderate proactive cooling can be preferable to repeatedly jumping to maximum speed after a thermal spike.",
+    "tags": [
+      "fan energy",
+      "cube law",
+      "efficiency"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "REF-26-CLUSTER-VS-LOCAL",
+    "title": "Cluster Control vs Local Control",
+    "category": "engineering",
+    "content": "A local temperature problem can sometimes be solved by moving workload rather than increasing every fan. NeuralFlow considers both spatial placement and thermal control when one GPU becomes a hotspot.",
+    "tags": [
+      "cluster control",
+      "local control",
+      "workload placement"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "REF-27-MULTI-SIGNAL",
+    "title": "Multi-Signal Thermal Reasoning",
+    "category": "engineering",
+    "content": "Reliable intervention should consider temperature, temperature trend, predicted temperature, workload, fan speed, and power together. A single signal can be noisy or misleading.",
+    "tags": [
+      "telemetry",
+      "trend",
+      "forecast",
+      "power"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "REF-28-INCIDENT-MEMORY",
+    "title": "Using Historical Incidents",
+    "category": "engineering",
+    "content": "Historical incidents provide precedent for deciding how similar thermal patterns were handled. Retrieval is useful for prior cases, lessons, and rationale behind control actions.",
+    "tags": [
+      "history",
+      "incidents",
+      "retrieval",
+      "precedent"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "REF-29-SEMANTIC-RETRIEVAL",
+    "title": "Why Semantic Retrieval Matters",
+    "category": "engineering",
+    "content": "An operator may describe the same concept using different words than the source document. Semantic retrieval can connect paraphrased questions to related runbooks, incidents, and engineering notes.",
+    "tags": [
+      "semantic retrieval",
+      "paraphrase",
+      "Moss"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "REF-30-KEYWORD-LIMIT",
+    "title": "Local Keyword Retrieval Limitation",
+    "category": "engineering",
+    "content": "Keyword retrieval is strongest when the query shares vocabulary with indexed text. It can work well for obvious queries, but is less robust when wording is unfamiliar or combines several related concepts.",
+    "tags": [
+      "keyword",
+      "local fallback",
+      "retrieval"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "REF-31-RETRIEVAL-PROVENANCE",
+    "title": "Retrieval Provenance",
+    "category": "engineering",
+    "content": "A retrieval result should expose backend, latency, matched document identifiers, and relevance information so an operator can distinguish a retrieved fact from a generic model response.",
+    "tags": [
+      "provenance",
+      "latency",
+      "documents"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "REF-32-VOICE-GROUNDING",
+    "title": "Voice Grounding Principle",
+    "category": "engineering",
+    "content": "For spoken operations questions, the LLM should answer from retrieved NeuralFlow context when a matching document exists. This keeps explanations aligned with actual project runbooks and incidents.",
+    "tags": [
+      "voice",
+      "grounding",
+      "LLM",
+      "retrieval"
+    ],
+    "synthetic": true
+  },
+  {
+    "id": "REF-33-ACTION-VS-KNOWLEDGE",
+    "title": "Knowledge vs Action Intent",
+    "category": "engineering",
+    "content": "Questions such as why, when, what, and how should the system should be treated as informational unless the user explicitly requests an operational command. Workload-related words alone are not sufficient evidence of an action.",
+    "tags": [
+      "intent",
+      "knowledge",
+      "action",
+      "voice"
+    ],
+    "synthetic": true
+  }
+]

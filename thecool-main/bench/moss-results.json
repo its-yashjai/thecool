@@ -1,26 +1,26 @@
 {
-  "when": "2026-09-19T09:00:00.135Z",
+  "when": "2026-09-22T21:10:25.196Z",
   "mode": "in-process",
   "backend": "moss",
-  "index": "neural-byo",
-  "docs": 24,
+  "index": "neuralflow-kb",
+  "docs": 96,
   "queries": 60,
   "perQueryBackend": {
     "in-process": 60
   },
   "embeddings": "Xenova/all-MiniLM-L6-v2 (local, semantic)",
   "embedMs": {
-    "p50": 73.68,
-    "p95": 241.55
+    "p50": 4.88,
+    "p95": 7.16
   },
   "wallClockMs": {
-    "p50": 120.54,
-    "p95": 316.92,
-    "max": 778.98
+    "p50": 6.52,
+    "p95": 21.21,
+    "max": 37.8
   },
   "reportedMs": {
-    "p50": 119.32,
-    "p95": 316.7
+    "p50": 6.4,
+    "p95": 21.11
   },
   "note": null
 }

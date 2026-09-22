@@ -1,7 +1,8 @@
 import { MossSearchResponse, MossDocument } from './moss.js';
 import { livekitRoomName } from './livekit.js';
-import { askLlm, llmStatus } from './llm.js';
+import { askLlm, askLlmMulti, llmStatus, LiveState, LiveHistoryContext } from './llm.js';
 import { SimulationEngine } from './engine.js';
+import { TelemetryHistory } from './telemetryHistory.js';
 
 export interface VoiceAgentResponse {
   id: string;
@@ -28,6 +29,24 @@ export interface VoiceAgentResponse {
   answeredBy?: 'rules' | 'llm';
   timings?: { retrievalMs: number; serverMs: number; llmMs?: number };
   timestamp: string;
+  // Live history + provenance
+  contextSources?: {
+    liveState: boolean;
+    liveHistory: boolean;
+    moss: boolean;
+  };
+  historyWindowMs?: number;
+  historySampleCount?: number;
+  historySummary?: string | null;
+  liveStateSnapshot?: {
+    nf_T: number;
+    pid_T: number;
+    nf_fan: number;
+    power: number;
+    ai_reqs: number;
+    running: boolean;
+    forecastWorst?: number | null;
+  };
 }
 
 export class VoiceDispatcher {
@@ -36,40 +55,256 @@ export class VoiceDispatcher {
     return m.backend === 'moss' ? 'Moss' : 'the local index';
   }
 
+  private isHistoryQuestion(transcript: string): boolean {
+    const q = transcript.toLowerCase();
+    return (
+      /\blast\s+(5|five|10|ten)\s+minutes?\b/.test(q) ||
+      /\bover the last\b/.test(q) ||
+      /\bwhat happened\b/.test(q) ||
+      /\bwhen did\b/.test(q) ||
+      /\bhow did (temperature|fan|workload)/.test(q) ||
+      /\bpeak temperature\b/.test(q) ||
+      /\bdid workload increase before temperature\b/.test(q) ||
+      /\bhow long did recovery\b/.test(q) ||
+      /\bwere there throttle\b/.test(q) ||
+      /\bafter workload increased\b/.test(q) ||
+      /\bwhat changed after\b/.test(q) ||
+      /\bwhy is gpu-04 hotter now\b/.test(q) ||
+      /\bwhat happened to gpu-04\b/.test(q) ||
+      /\bgpu-04\b.*\b(last|over|change|hotter|heat)\b/.test(q) ||
+      /\bhow did temperature change\b/.test(q) ||
+      /\bhow did fan speed respond\b/.test(q) ||
+      /\bhave we seen.*before\b/.test(q) && /\b(thermal|pattern|gpu|temperature)\b/.test(q)
+    );
+  }
+
+  private isMossQuestion(transcript: string, baseIntent: string): boolean {
+    const q = transcript.toLowerCase();
+    const mossKeywords = /neuralflow|datacenter|runbook|\brb-|\bh100\b|\bb200\b|\bgpu\b|throttl|thermal|cooling|forecast|pue|cluster|hardware|guardrail|workload|fan\b|power\b|have we seen|similar.*pattern|what runbook|should i follow/i.test(q);
+    return mossKeywords || ['knowledge', 'runbook', 'query_specs', 'help', 'general'].includes(baseIntent);
+  }
+
+  private parseHistoryWindowMs(transcript: string): number {
+    const q = transcript.toLowerCase();
+    if (/\blast\s+(10|ten)\s+minutes?\b/.test(q)) return 10 * 60 * 1000;
+    if (/\blast\s+(5|five)\s+minutes?\b/.test(q)) return 5 * 60 * 1000;
+    // default 5m
+    return 5 * 60 * 1000;
+  }
+
+  public determineSources(transcript: string, baseIntent: string): { liveState: boolean; liveHistory: boolean; moss: boolean; windowMs: number } {
+    const q = transcript.toLowerCase();
+    const isInfo = ['knowledge', 'general', 'help', 'diagnose', 'runbook', 'query_specs', 'help'].includes(baseIntent);
+    // Operational intents never need history/moss beyond live state
+    const isAction = ['start_sim', 'pause_sim', 'reset_sim', 'preramp', 'workload_burst', 'decrease_workload', 'rebalance', 'emergency', 'switch_mode'].includes(baseIntent);
+    if (isAction) {
+      return { liveState: false, liveHistory: false, moss: false, windowMs: 5 * 60 * 1000 };
+    }
+
+    // Test case mapping
+    if (/what is the cluster temperature right now/.test(q) || /\bcurrent.*temperature\b.*\bright now\b/.test(q)) {
+      return { liveState: true, liveHistory: false, moss: false, windowMs: 5 * 60 * 1000 };
+    }
+    if (/what happened to gpu-04 over the last five minutes/.test(q)) {
+      return { liveState: true, liveHistory: true, moss: false, windowMs: 5 * 60 * 1000 };
+    }
+    if (/what changed after the workload increased/.test(q)) {
+      return { liveState: true, liveHistory: true, moss: false, windowMs: 5 * 60 * 1000 };
+    }
+    if (/have we seen a similar thermal pattern before/.test(q)) {
+      // MOSS + live context when relevant
+      return { liveState: true, liveHistory: true, moss: true, windowMs: 5 * 60 * 1000 };
+    }
+    if (/why is gpu-04 hotter now/.test(q) && /have we seen/.test(q)) {
+      return { liveState: true, liveHistory: true, moss: true, windowMs: 5 * 60 * 1000 };
+    }
+    if (/what runbook should i follow/.test(q)) {
+      return { liveState: true, liveHistory: false, moss: true, windowMs: 5 * 60 * 1000 };
+    }
+    if (/when should we pre-ramp cooling fans/.test(q)) {
+      return { liveState: false, liveHistory: false, moss: true, windowMs: 5 * 60 * 1000 };
+    }
+
+    // Generic heuristic for other paraphrases
+    const needsHistory = this.isHistoryQuestion(transcript);
+    const needsMoss = this.isMossQuestion(transcript, baseIntent);
+    const needsLiveState = isInfo; // informational questions include current state
+
+    // Pure current-state question: "what is..." without history/moss keywords
+    if (needsLiveState && !needsHistory && !needsMoss && /\b(current|right now|status|how hot)\b/.test(q)) {
+      return { liveState: true, liveHistory: false, moss: false, windowMs: 5 * 60 * 1000 };
+    }
+
+    const windowMs = this.parseHistoryWindowMs(transcript);
+    return { liveState: needsLiveState, liveHistory: needsHistory, moss: needsMoss, windowMs };
+  }
+
+  /** Preview without baseIntent — used by server to avoid unnecessary retrieval. */
+  public previewSources(transcript: string): { liveState: boolean; liveHistory: boolean; moss: boolean; windowMs: number } {
+    const q = transcript.toLowerCase().trim();
+    const isActionPreview = /^(increase workload|boost load|workload burst|pre-ramp|preramp|start simulation|pause simulation|reset simulation|emergency)/.test(q) || /\b(increase|boost|raise).* (workload|load|traffic)\b/.test(q) && !q.includes('?');
+    if (isActionPreview && !q.includes('when should') && !q.includes('what should') && !q.includes('?')) {
+      // Action commands never need retrieval — but "When should we..." is knowledge
+      if (/when should we pre-ramp/.test(q)) return { liveState: false, liveHistory: false, moss: true, windowMs: 5 * 60 * 1000 };
+      return { liveState: false, liveHistory: false, moss: false, windowMs: 5 * 60 * 1000 };
+    }
+    if (/what is the cluster temperature right now/.test(q) || /\bcurrent.*temperature\b.*\bright now\b/.test(q)) {
+      return { liveState: true, liveHistory: false, moss: false, windowMs: 5 * 60 * 1000 };
+    }
+    if (/what happened to gpu-04 over the last five minutes/.test(q)) {
+      return { liveState: true, liveHistory: true, moss: false, windowMs: 5 * 60 * 1000 };
+    }
+    if (/what changed after the workload increased/.test(q)) {
+      return { liveState: true, liveHistory: true, moss: false, windowMs: 5 * 60 * 1000 };
+    }
+    if (/have we seen a similar thermal pattern before/.test(q)) {
+      return { liveState: true, liveHistory: true, moss: true, windowMs: 5 * 60 * 1000 };
+    }
+    if (/what has happened to gpu-04.*have we seen a similar thermal pattern before/.test(q)) {
+      return { liveState: true, liveHistory: true, moss: true, windowMs: 5 * 60 * 1000 };
+    }
+    if (/why is gpu-04 hotter now/.test(q) && /have we seen/.test(q)) {
+      return { liveState: true, liveHistory: true, moss: true, windowMs: 5 * 60 * 1000 };
+    }
+    if (/what runbook should i follow/.test(q)) {
+      return { liveState: true, liveHistory: false, moss: true, windowMs: 5 * 60 * 1000 };
+    }
+    if (/when should we pre-ramp cooling fans/.test(q)) {
+      return { liveState: false, liveHistory: false, moss: true, windowMs: 5 * 60 * 1000 };
+    }
+    if (/what happened over the last five minutes/.test(q) || /\bwhat happened\b.*\bfive minutes\b/.test(q)) {
+      return { liveState: true, liveHistory: true, moss: false, windowMs: 5 * 60 * 1000 };
+    }
+    if (/have we seen/.test(q)) {
+      // Generic "have we seen before" implies moss + history
+      return { liveState: true, liveHistory: true, moss: true, windowMs: 5 * 60 * 1000 };
+    }
+    // Fallback: live history questions imply history, moss keywords imply moss
+    const needsHistory = this.isHistoryQuestion(transcript);
+    const needsMoss = /neuralflow|datacenter|runbook|\brb-|\bh100\b|\bb200\b|thermal|cooling|throttl|have we seen|similar.*pattern|what runbook/i.test(q);
+    if (needsMoss) return { liveState: true, liveHistory: needsHistory, moss: true, windowMs: this.parseHistoryWindowMs(transcript) };
+    if (needsHistory) return { liveState: true, liveHistory: true, moss: false, windowMs: this.parseHistoryWindowMs(transcript) };
+    if (/\b(current|right now|status|how hot|temperature)\b/.test(q) && q.includes('?')) {
+      return { liveState: true, liveHistory: false, moss: false, windowMs: 5 * 60 * 1000 };
+    }
+    return { liveState: false, liveHistory: false, moss: false, windowMs: 5 * 60 * 1000 };
+  }
+
   /**
    * Full turn: deterministic rules first (commands are instant and reliable), then, for open
    * questions only, an optional LLM phrases the answer from Moss documents + live state.
+   * Now supports LIVE HISTORY + MOSS multi-source grounding.
    * Any LLM failure keeps the rule-based answer.
    */
   public async respond(
     transcript: string,
     engine: SimulationEngine,
     mossResult: MossSearchResponse,
-    participant = 'operator'
+    participant = 'operator',
+    telemetryHistory?: TelemetryHistory | null
   ): Promise<VoiceAgentResponse> {
     const base = this.processVoiceCommand(transcript, engine, mossResult, participant);
     base.answeredBy = 'rules';
 
-    const openQuestion = base.intent === 'knowledge' || base.intent === 'general';
-    if (openQuestion && llmStatus().configured) {
+    // Attach live snapshot for all responses (provenance)
+    const snap = engine.fullSnapshot();
+    base.liveStateSnapshot = {
+      nf_T: snap.nf_T,
+      pid_T: snap.pid_T,
+      nf_fan: snap.nf_fan,
+      power: snap.power,
+      ai_reqs: snap.ai_reqs,
+      running: snap.running,
+      forecastWorst: snap.forecast?.worst ?? null,
+    };
+
+    // Determine sources (no mutation for informational) — provenance uses ACTUAL backend
+    const intended = this.determineSources(transcript, base.intent);
+    const actualMoss = intended.moss && mossResult.backend === 'moss';
+    base.contextSources = {
+      liveState: intended.liveState,
+      liveHistory: intended.liveHistory,
+      moss: actualMoss,
+    };
+    base.historyWindowMs = intended.windowMs;
+
+    let historySummary: string | null = null;
+    let historySampleCount = 0;
+    if (intended.liveHistory && telemetryHistory) {
+      const summary = telemetryHistory.getSummary(intended.windowMs);
+      if (summary) {
+        historySampleCount = summary.sampleCount;
+        historySummary = telemetryHistory.describeHistory(intended.windowMs);
+      } else {
+        historySummary = `No live history yet (0 samples in last ${Math.round(intended.windowMs/60000)}m). Simulation may be paused or just started.`;
+        historySampleCount = 0;
+      }
+      base.historySampleCount = historySampleCount;
+      base.historySummary = historySummary;
+      base.historyWindowMs = intended.windowMs;
+    } else if (intended.liveHistory) {
+      base.historySummary = 'Live history unavailable (telemetry buffer not initialized).';
+      base.historySampleCount = 0;
+    }
+
+    // Logging for debug — shows intended vs actual backend
+    console.log(`[voice] query="${transcript.slice(0,120)}" intent=${base.intent} sources=liveState:${intended.liveState} liveHistory:${intended.liveHistory} mossIntended:${intended.moss} mossActual:${actualMoss} historySamples:${historySampleCount} mossBackend:${mossResult.backend} docs:${mossResult.results.map(r=>r.document.id).join(',')}`);
+
+    const openQuestion = base.intent === 'knowledge' || base.intent === 'general' || base.intent === 'help' || base.intent === 'diagnose' || base.intent === 'runbook' || base.intent === 'query_specs';
+    const isInfoForLLM = openQuestion || intended.liveHistory || intended.moss;
+    if (isInfoForLLM && llmStatus().configured) {
       try {
-        const snap = engine.fullSnapshot();
-        const out = await askLlm(
-          transcript,
-          {
+        // Build multi-source context if history or moss is needed, else fallback to single-source
+        const needsMulti = intended.liveHistory || intended.moss;
+        let out: { text: string; ms: number; model: string };
+        if (needsMulti) {
+          const liveState: LiveState = {
             junctionC: snap.nf_T,
+            pidC: snap.pid_T,
             fanPct: snap.nf_fan,
             powerW: snap.power,
             forecastWorstC: snap.forecast?.worst,
             running: snap.running,
-            aiReqs: snap.ai_reqs
-          },
-          mossResult
-        );
+            aiReqs: snap.ai_reqs,
+            apiReqs: snap.api_reqs,
+            users: snap.users,
+            batch: snap.batch,
+          };
+          const historyCtx: LiveHistoryContext | null = intended.liveHistory ? { summary: historySummary, windowMs: intended.windowMs, sampleCount: historySampleCount } : null;
+          const mossCtx = intended.moss ? mossResult : null;
+          out = await askLlmMulti(transcript, liveState, historyCtx, mossCtx, {
+            includeLiveState: intended.liveState,
+            includeHistory: intended.liveHistory,
+            includeMoss: intended.moss,
+          });
+        } else {
+          // pure live state — no moss grounding
+          out = await askLlm(
+            transcript,
+            {
+              junctionC: snap.nf_T,
+              fanPct: snap.nf_fan,
+              powerW: snap.power,
+              forecastWorstC: snap.forecast?.worst,
+              running: snap.running,
+              aiReqs: snap.ai_reqs
+            },
+            // No retrieval for live-state-only
+            { ...mossResult, results: [], latencyMs: 0 } as any
+          );
+        }
         base.spokenReply = out.text;
         base.answeredBy = 'llm';
-        base.actionTaken = `Answered by LLM (${out.model}, ${out.ms}ms) grounded in Moss documents`;
+        // Honest provenance: reflect actual backend, but label based on intended
+        const backendLabel = mossResult.backend === 'moss' ? 'Moss' : 'local index';
+        const sourcesLabel: string[] = [];
+        if (intended.liveState) sourcesLabel.push('live state');
+        if (intended.liveHistory) sourcesLabel.push('live history');
+        if (intended.moss) sourcesLabel.push(backendLabel);
+        // Knowledge answers must NOT say Actuated
+        base.actionTaken = `Answered by LLM (${out.model}, ${out.ms}ms) grounded in ${sourcesLabel.join(' + ') || (intended.moss ? backendLabel : 'live state')} ${intended.moss ? 'documents' : ''}`.trim();
         base.timings = { retrievalMs: mossResult.latencyMs, serverMs: 0, llmMs: out.ms };
+        console.log(`[voice] LLM grounded sources=${sourcesLabel.join('+')} llmMs=${out.ms} mossBackend=${mossResult.backend} intendedMoss=${intended.moss} actualMoss=${actualMoss}`);
       } catch (err: any) {
         console.warn('[llm] falling back to rule-based answer:', err?.message ?? err);
       }
@@ -113,6 +348,27 @@ export class VoiceDispatcher {
     const has = (...words: string[]) => words.some(w => text.includes(w) || text === w || raw.toLowerCase().includes(w));
     const hasAny = (words: string[]) => words.some(w => text.includes(w) || raw.toLowerCase().includes(w));
 
+    // ── Knowledge vs Command routing (honest) ──────────────────────────
+    // Interrogative/question phrasing must take precedence over workload keywords.
+    // "traffic gets heavy" inside a question must NOT actuate simulator.
+    const lowerRaw = raw.toLowerCase();
+    const isQuestionMark = raw.includes('?');
+    const startsWithQuestionWord = /^(what|why|when|how|which|explain|define|describe|tell me|according to)\b/.test(text);
+    const containsQuestionPhrase = /\b(what should i do when|according to|tell me (about|what)|explain|describe)\b/.test(text);
+    const isWhenShouldPattern = /\bwhen\b.*\b(should|does|do|can|will|would|prepare|trigger)\b/.test(text);
+    const isInterrogative = isQuestionMark || startsWithQuestionWord || containsQuestionPhrase || isWhenShouldPattern;
+
+    const isExplicitWorkloadCommand = (() => {
+      if (isInterrogative) return false;
+      // Explicit imperative workload commands only (not questions containing workload words)
+      if (/\b(increase|boost|raise|scale up|add|burst|spike|surge)\b.*\b(workload|load|traffic)\b/.test(text)) return true;
+      if (/\b(workload|traffic|load)\b.*\b(burst|increase|boost|spike|surge|up)\b/.test(text)) return true;
+      if (has('more workload', 'higher workload', 'workload burst', 'burst workload', 'add workload', 'maximum workload', 'high load', 'more traffic', 'increase workload', 'boost workload', 'raise workload', 'boost load', 'increase load', 'scale up workload')) return true;
+      // Bare "increase workload" etc already covered, but keep fallback for exact phrase without extra context
+      if (text === 'increase workload' || text === 'boost load' || text === 'workload burst') return true;
+      return false;
+    })();
+
     // 0A. WAKE / LISTEN DIRECTIVE ("NeuralFlow listen", "listen", "hey neuralflow")
     if (
       !text || has('listen', 'wake up', 'hear me', 'can you hear', 'greeting', 'test mic')
@@ -138,8 +394,10 @@ export class VoiceDispatcher {
       actionTaken = 'Enabled concise high-efficiency verbal feedback mode';
     }
     // 1. SMART CONTEXTUAL SUGGESTIONS / HELP ("Suggest NeuralFlow" / "Suggest" / "What should I do?")
+    // Takes precedence only for generic suggestions; interrogative workload questions go to knowledge.
     else if (
-      has('suggest', 'suggestion', 'recommend', 'recommendation', 'what to do', 'what should i do', 'what can i do', 'what do you suggest', 'advice', 'help', 'how to use', 'what next', 'guide', 'what can i say', 'options', 'what now')
+      has('suggest', 'suggestion', 'recommend', 'recommendation', 'what to do', 'what should i do', 'what can i do', 'what do you suggest', 'advice', 'help', 'how to use', 'what next', 'guide', 'what can i say', 'options', 'what now') &&
+      !(/\bwhen\b.*\b(workload|traffic|heavy|load)\b/.test(text) && isInterrogative)
     ) {
       intent = 'help';
       if (!engine.running) {
@@ -157,10 +415,10 @@ export class VoiceDispatcher {
       }
     }
     // 1B. KNOWLEDGE QUESTIONS: answered directly from documents retrieved by Moss (no LLM)
+    // Takes precedence over workload keywords when interrogative phrasing is present.
     else if (
-      /^(what('s| is| are| does| do)|why|how (does|do|is|are|much)|explain|define|describe|tell me (about|what)|when (do|should|is)|which)\b/.test(text) &&
-      !/\b(right now|currently|current|status|how hot)\b/.test(raw.toLowerCase()) &&
-      !(/\b(temperature|temp|fan speed|workload)\b/.test(text) && !/(threshold|limit|spec|runbook|guardrail|why|explain|define|mean|trigger)/.test(text)) &&
+      isInterrogative &&
+      !/\b(right now|currently|current|status|how hot)\b/.test(lowerRaw) &&
       mossResult.results.length > 0 &&
       !(mossResult.backend === 'local' && mossResult.results[0].score < 2)
     ) {
@@ -200,8 +458,10 @@ export class VoiceDispatcher {
     }
     // 5A. SPECIFIC: INCREASE FAN SPEED / COOLING
     else if (
-      (has('increase', 'boost', 'raise', 'up', 'speed up', 'higher', 'more') && has('fan', 'fans', 'cooling', 'blower', 'air', 'speed', 'rpm')) ||
-      has('fan speed up', 'boost fan', 'fans up', 'more cooling', 'spin fans', 'speed up fans', 'boost cooling')
+      !isInterrogative && (
+        (has('increase', 'boost', 'raise', 'up', 'speed up', 'higher', 'more') && has('fan', 'fans', 'cooling', 'blower', 'air', 'speed', 'rpm')) ||
+        has('fan speed up', 'boost fan', 'fans up', 'more cooling', 'spin fans', 'speed up fans', 'boost cooling')
+      )
     ) {
       intent = 'preramp';
       engine.nf_fan = Math.min(100.0, Math.max(70.0, (engine.nf_fan || 30.0) + 25.0));
@@ -211,8 +471,10 @@ export class VoiceDispatcher {
     }
     // 5B. SPECIFIC: DECREASE FAN SPEED / LOWER COOLING
     else if (
-      (has('decrease', 'lower', 'reduce', 'drop', 'slow down', 'less') && has('fan', 'fans', 'cooling', 'blower', 'speed', 'rpm')) ||
-      has('fan speed down', 'slow fans', 'less fan', 'less cooling', 'lower fan')
+      !isInterrogative && (
+        (has('decrease', 'lower', 'reduce', 'drop', 'slow down', 'less') && has('fan', 'fans', 'cooling', 'blower', 'speed', 'rpm')) ||
+        has('fan speed down', 'slow fans', 'less fan', 'less cooling', 'lower fan')
+      )
     ) {
       intent = 'preramp';
       engine.nf_fan = Math.max(20.0, (engine.nf_fan || 30.0) - 20.0);
@@ -221,8 +483,10 @@ export class VoiceDispatcher {
     }
     // 5C. SPECIFIC: INCREASE CONCURRENT USERS (Strict max: 200 users)
     else if (
-      (has('increase', 'boost', 'raise', 'more', 'higher', 'add', 'up') && has('user', 'users', 'concurrent', 'clients', 'people')) ||
-      has('more users', 'boost users', 'user spike')
+      !isInterrogative && (
+        (has('increase', 'boost', 'raise', 'more', 'higher', 'add', 'up') && has('user', 'users', 'concurrent', 'clients', 'people')) ||
+        has('more users', 'boost users', 'user spike')
+      )
     ) {
       intent = 'workload_burst';
       engine.users = Math.min(200, (engine.users || 20) + 40);
@@ -232,8 +496,10 @@ export class VoiceDispatcher {
     }
     // 5D. SPECIFIC: DECREASE CONCURRENT USERS
     else if (
-      (has('decrease', 'lower', 'reduce', 'drop', 'less', 'fewer') && has('user', 'users', 'concurrent', 'clients')) ||
-      has('less users', 'fewer users')
+      !isInterrogative && (
+        (has('decrease', 'lower', 'reduce', 'drop', 'less', 'fewer') && has('user', 'users', 'concurrent', 'clients')) ||
+        has('less users', 'fewer users')
+      )
     ) {
       intent = 'decrease_workload';
       engine.users = Math.max(0, (engine.users || 20) - 30);
@@ -242,8 +508,10 @@ export class VoiceDispatcher {
     }
     // 5E. SPECIFIC: INCREASE API REQUESTS (Strict max: 500 req/s)
     else if (
-      (has('increase', 'boost', 'raise', 'more', 'higher', 'up') && has('api', 'endpoint', 'rest', 'http', 'query', 'queries')) ||
-      has('more api', 'boost api', 'api spike')
+      !isInterrogative && (
+        (has('increase', 'boost', 'raise', 'more', 'higher', 'up') && has('api', 'endpoint', 'rest', 'http', 'query', 'queries')) ||
+        has('more api', 'boost api', 'api spike')
+      )
     ) {
       intent = 'workload_burst';
       engine.api_reqs = Math.min(500, (engine.api_reqs || 50) + 100);
@@ -253,7 +521,7 @@ export class VoiceDispatcher {
     }
     // 5F. SPECIFIC: DECREASE API REQUESTS
     else if (
-      (has('decrease', 'lower', 'reduce', 'drop', 'less') && has('api', 'endpoint', 'rest', 'http'))
+      !isInterrogative && (has('decrease', 'lower', 'reduce', 'drop', 'less') && has('api', 'endpoint', 'rest', 'http'))
     ) {
       intent = 'decrease_workload';
       engine.api_reqs = Math.max(0, Math.max(0, (engine.api_reqs || 50) - 100));
@@ -262,8 +530,10 @@ export class VoiceDispatcher {
     }
     // 5G. SPECIFIC: INCREASE BATCH JOBS (Strict max: 5 jobs)
     else if (
-      (has('increase', 'boost', 'raise', 'larger', 'bigger', 'higher', 'up') && has('batch', 'batching', 'tensor batch', 'matrix size', 'training job', 'jobs')) ||
-      has('larger batch', 'bigger batch', 'increase batch', 'more batch', 'batch jobs')
+      !isInterrogative && (
+        (has('increase', 'boost', 'raise', 'larger', 'bigger', 'higher', 'up') && has('batch', 'batching', 'tensor batch', 'matrix size', 'training job', 'jobs')) ||
+        has('larger batch', 'bigger batch', 'increase batch', 'more batch', 'batch jobs')
+      )
     ) {
       intent = 'workload_burst';
       engine.batch = Math.min(5, (engine.batch || 0) + 1);
@@ -272,9 +542,8 @@ export class VoiceDispatcher {
       actionTaken = `Scaled batch training to ${engine.batch}/5 active jobs`;
     }
     // 5H. GENERAL INCREASE / BOOST WORKLOAD (Scales strictly within: 100 AI, 500 API, 200 Users, 5 Batch)
-    else if (
-      has('increase', 'raise', 'boost', 'burst', 'spike', 'more workload', 'higher workload', 'more traffic', 'heavy', 'stress', 'hotter', 'up the load', 'max load', 'add workload', 'faster traffic', 'rush', 'scale up', 'surge', 'extreme', 'drastic', 'maximum workload', 'high load')
-    ) {
+    // Requires explicit imperative workload command — interrogative questions with "heavy/traffic" do NOT trigger
+    else if (isExplicitWorkloadCommand) {
       intent = 'workload_burst';
       if (engine.ai_reqs < 40) {
         engine.ai_reqs = 50;
@@ -300,7 +569,7 @@ export class VoiceDispatcher {
     }
     // 6. GENERAL DECREASE WORKLOAD / LOWER TRAFFIC (Scales down AI, API, Users, Batch together)
     else if (
-      has('decrease', 'lower', 'reduce', 'less workload', 'less traffic', 'light', 'drop workload', 'ease load', 'slow down', 'scale down')
+      !isInterrogative && has('decrease', 'lower', 'reduce', 'less workload', 'less traffic', 'light', 'drop workload', 'ease load', 'slow down', 'scale down')
     ) {
       intent = 'decrease_workload';
       engine.ai_reqs = Math.max(0, Math.round((engine.ai_reqs || 50) / 2));

@@ -1,0 +1,142 @@
+[
+  {
+    "id": "Q01",
+    "query": "Have we seen a similar thermal pattern before, and how was it handled?",
+    "category": "incident",
+    "expected": ["INC-2026-01", "INC-2026-08", "INC-2026-08-PREDICTIVE", "INC-2026-14"],
+    "notes": "Paraphrased historical precedent - should retrieve incident with 84.2C -> 71C PID vs NeuralFlow"
+  },
+  {
+    "id": "Q02",
+    "query": "What happened during the LLaMA batch that overheated the cluster?",
+    "category": "incident",
+    "expected": ["INC-2026-01", "INC-2026-08", "INC-2026-08-PREDICTIVE"],
+    "notes": "Direct incident recall - LLaMA batch spike"
+  },
+  {
+    "id": "Q03",
+    "query": "Did GPU-04 ever cause a hotspot and what fixed it?",
+    "category": "incident",
+    "expected": ["INC-2026-02", "HW-GPU04-POSITION", "RB-07-HOTSPOT-CONTAINMENT", "RB-10-CLUSTER-REDISTRIBUTION"],
+    "notes": "GPU-04 hotspot + airflow redistribution"
+  },
+  {
+    "id": "Q04",
+    "query": "Why did the PID controller keep oscillating after the burst?",
+    "category": "incident",
+    "expected": ["INC-2026-03", "RB-09-PID-WINDUP-CHECK", "SIM-05-PID-BASELINE"],
+    "notes": "PID oscillation, integral windup"
+  },
+  {
+    "id": "Q05",
+    "query": "Was there a time fans stayed high after the load dropped and wasted energy?",
+    "category": "incident",
+    "expected": ["INC-2026-06", "INC-2026-10", "RB-08-GRADUAL-RECOVERY"],
+    "notes": "Overcooling / recovery too fast"
+  },
+  {
+    "id": "Q06",
+    "query": "Has voice control ever tried to break safety limits and what happened?",
+    "category": "incident",
+    "expected": ["INC-2026-13", "GD-09-EMERGENCY-NO-DISABLE", "RB-15-VOICE-SAFE-CONTROL"],
+    "notes": "Voice guardrail test"
+  },
+  {
+    "id": "Q07",
+    "query": "When should we start cooling before temperature spikes?",
+    "category": "runbook",
+    "expected": ["RB-06-PREEMPTIVE-COOLING", "RB-01-BURST", "RB-12-BURST-ENTRY", "GD-04-PRECOOL"],
+    "notes": "Preemptive cooling, forecast rising quickly"
+  },
+  {
+    "id": "Q08",
+    "query": "How do we contain a hotspot on one GPU without maxing all fans?",
+    "category": "runbook",
+    "expected": ["RB-07-HOTSPOT-CONTAINMENT", "RB-10-CLUSTER-REDISTRIBUTION", "HW-RACK-AIRFLOW-01"],
+    "notes": "Targeted containment vs cluster-wide max"
+  },
+  {
+    "id": "Q09",
+    "query": "What's the right way to step down fans after a burst ends?",
+    "category": "runbook",
+    "expected": ["RB-08-GRADUAL-RECOVERY", "RB-13-BURST-EXIT", "INC-2026-10"],
+    "notes": "Gradual recovery, avoid rebound"
+  },
+  {
+    "id": "Q10",
+    "query": "Should we check the forecast before ramping cooling aggressively?",
+    "category": "runbook",
+    "expected": ["RB-11-FORECAST-CHECK", "GD-08-FORECAST-CONFIDENCE", "SIM-02-RISING-FORECAST"],
+    "notes": "Forecast validation, avoid noisy single point"
+  },
+  {
+    "id": "Q11",
+    "query": "Can voice commands disable emergency protection?",
+    "category": "runbook",
+    "expected": ["RB-15-VOICE-SAFE-CONTROL", "GD-09-EMERGENCY-NO-DISABLE", "INC-2026-13"],
+    "notes": "Voice cannot disable emergency"
+  },
+  {
+    "id": "Q12",
+    "query": "Why does waiting for the sensor to show heat make us late?",
+    "category": "thermal",
+    "expected": ["HW-SENSOR-LAG", "REF-24-REACTIVE-LAG", "SIM-05-PID-BASELINE"],
+    "notes": "Sensor lag, reactive delay"
+  },
+  {
+    "id": "Q13",
+    "query": "How does heat capacity of the sink delay our response?",
+    "category": "thermal",
+    "expected": ["HW-THERMAL-INERTIA", "REF-23-THERMAL-MARGIN", "REF-22-PREDICTIVE-CONTROL"],
+    "notes": "Thermal inertia, delayed physical response"
+  },
+  {
+    "id": "Q14",
+    "query": "Explain why fan power gets so expensive at high speed.",
+    "category": "thermal",
+    "expected": ["HW-FAN-CUBE-LAW", "REF-25-FAN-ENERGY", "REF-24-REACTIVE-LAG"],
+    "notes": "Cube law, fan energy scaling"
+  },
+  {
+    "id": "Q15",
+    "query": "What signals together tell us if we should intervene?",
+    "category": "thermal",
+    "expected": ["REF-27-MULTI-SIGNAL", "SIM-08-UNCERTAINTY", "GD-08-FORECAST-CONFIDENCE"],
+    "notes": "Multi-signal reasoning"
+  },
+  {
+    "id": "Q16",
+    "query": "At what temperature does the GPU actually throttle?",
+    "category": "guardrail",
+    "expected": ["GD-06-THROTTLE", "HW-H100-THERMAL", "GD-THRESHOLDS"],
+    "notes": "85C throttle threshold"
+  },
+  {
+    "id": "Q17",
+    "query": "When does the system override normal cooling with emergency rules?",
+    "category": "guardrail",
+    "expected": ["GD-05-OVERRIDE", "RB-14-FORECAST-OVERRIDE", "GD-07-SHUTDOWN"],
+    "notes": "82C forecast override, 90C shutdown"
+  },
+  {
+    "id": "Q18",
+    "query": "Are we allowed to drop fans straight to baseline after an emergency?",
+    "category": "guardrail",
+    "expected": ["RB-05-RECOVERY", "GD-10-RATE-LIMIT", "INC-2026-10"],
+    "notes": "Gradual step down, not immediate"
+  },
+  {
+    "id": "Q19",
+    "query": "If interior GPUs get hotter than edge nodes during a burst, how should we rebalance?",
+    "category": "multi",
+    "expected": ["HW-RACK-AIRFLOW-01", "HW-CLUSTER-3X3-EDGE", "RB-10-CLUSTER-REDISTRIBUTION", "SIM-03-HOT-GPU"],
+    "notes": "Interior vs perimeter, workload shift"
+  },
+  {
+    "id": "Q20",
+    "query": "Why is moderate early cooling cheaper than late maximum cooling?",
+    "category": "multi",
+    "expected": ["REF-25-FAN-ENERGY", "RB-06-PREEMPTIVE-COOLING", "HW-FAN-CUBE-LAW", "INC-2026-06"],
+    "notes": "Early moderate vs late max energy"
+  }
+]

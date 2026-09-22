@@ -88,6 +88,10 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
     livekitParticipants,
     lastRetrieval,
     lastTimings,
+    lastContextSources,
+    lastHistorySummary,
+    lastHistorySampleCount,
+    lastHistoryWindowMs,
     connectLiveKit,
     disconnectLiveKit,
     toggleMute,
@@ -95,13 +99,21 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
     dispatchVoice,
     simulateVoice,
     clearHistory
-  } = useGlobalVoice();
+  } = useGlobalVoice() as any;
 
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
   const [inputPrompt, setInputPrompt] = useState<string>('');
   // Real data from the last voice turn (measured on the server, not hardcoded).
   const lastMossData: MossSearchResponse | null = lastRetrieval;
   const [retrievalStats, setRetrievalStats] = useState<{ status: any; latency: any[] } | null>(null);
+  const [isToggling, setIsToggling] = useState(false);
+  const refreshStats = async () => {
+    try {
+      const r = await fetch('/api/moss/stats');
+      const d = await r.json();
+      setRetrievalStats(d);
+    } catch {}
+  };
   useEffect(() => {
     let cancelled = false;
     fetch('/api/moss/stats')
@@ -110,10 +122,32 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
       .catch(() => {});
     return () => { cancelled = true; };
   }, [lastRetrieval]);
+  const forcedMode: 'auto' | 'moss' | 'local' = retrievalStats?.status?.forcedBackend ?? 'auto';
+  // When a manual mode is forced, it takes precedence over last turn's backend — so click feels instant
   const activeBackend: 'moss' | 'local' =
-    lastMossData?.backend ?? retrievalStats?.status?.activeBackend ?? 'local';
+    forcedMode !== 'auto' ? forcedMode : (lastMossData?.backend ?? retrievalStats?.status?.activeBackend ?? 'local');
   const isMossBackend = activeBackend === 'moss';
   const backendStats = retrievalStats?.latency?.find((l: any) => l.backend === activeBackend);
+
+  const toggleRetrievalMode = async () => {
+    if (isToggling) return;
+    const next: 'moss' | 'local' = isMossBackend ? 'local' : 'moss';
+    setIsToggling(true);
+    try {
+      const res = await fetch('/api/moss/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: next }),
+      });
+      const data = await res.json();
+      if (data?.status) setRetrievalStats(data);
+      else await refreshStats();
+    } catch {
+      await refreshStats();
+    } finally {
+      setIsToggling(false);
+    }
+  };
   const roomLabel =
     livekitStatus === 'connected'
       ? `In room (${livekitParticipants} ${livekitParticipants === 1 ? 'participant' : 'participants'})`
@@ -243,11 +277,18 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
           </div>
         </div>
 
-        {/* Moss Retrieval Card */}
-        <div className="p-4 rounded-2xl bg-[#0d0d24] border border-[#2ed573]/30 shadow-lg flex items-center justify-between">
+        {/* Moss Retrieval Card — hidden click to toggle Retrieval Mode (Moss ↔ Local) */}
+        <div
+          onClick={toggleRetrievalMode}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleRetrievalMode(); } }}
+          title="Click to switch Retrieval Mode (Moss ↔ Local) — demo control"
+          className={`p-4 rounded-2xl bg-[#0d0d24] shadow-lg flex items-center justify-between cursor-pointer select-none transition-all group border ${isMossBackend ? 'border-[#2ed573]/30 hover:border-[#2ed573]/50' : 'border-amber-500/30 hover:border-amber-500/50'} ${isToggling ? 'opacity-60 pointer-events-none' : ''}`}
+        >
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-[#2ed573]/20 flex items-center justify-center border border-[#2ed573]/40">
-              <Zap className="w-5 h-5 text-[#2ed573]" />
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center border transition-colors ${isMossBackend ? 'bg-[#2ed573]/20 border-[#2ed573]/40' : 'bg-amber-500/20 border-amber-500/40'}`}>
+              <Zap className={`w-5 h-5 ${isMossBackend ? 'text-[#2ed573]' : 'text-amber-400'}`} />
             </div>
             <div>
               <div className="flex items-center gap-2">
@@ -518,7 +559,7 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
                     <span className="text-[9px] font-mono text-zinc-500">{m.timestamp}</span>
                     {m.mossLatency !== undefined && (
                       <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#2ed573]/20 text-[#2ed573] border border-[#2ed573]/30">
-                        ⚡ {m.mossBackend === 'local' ? 'Local' : 'Moss'} {m.mossLatency}ms
+                        ⚡ {m.mossBackend === 'local' ? 'Local' : m.mossBackend === 'moss' ? 'Moss' : 'Local'} {m.mossLatency}ms
                       </span>
                     )}
                     {m.answeredBy === 'llm' && (
@@ -542,12 +583,12 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
                   >
                     <p className="text-[12.5px] leading-normal">{m.text}</p>
 
-                    {/* Actuation & Action Feedback */}
+                    {/* Actuation & Action Feedback — Actuated only for real mutations */}
                     {m.actionTaken && (
                       <div className="mt-2.5 pt-2.5 border-t border-white/10 space-y-2">
                         <div className="flex items-center gap-1.5 text-[11px] font-mono text-emerald-400">
                           <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span className="font-semibold">Actuated: {m.actionTaken}</span>
+                          <span className="font-semibold">{m.actionTaken.startsWith('Answered') ? m.actionTaken : `Actuated: ${m.actionTaken}`}</span>
                         </div>
 
                         {/* Interactive Verification Pill */}
@@ -578,6 +619,20 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
                             📚 {doc}
                           </span>
                         ))}
+                      </div>
+                    )}
+                    {(m as any).contextSources && (
+                      <div className="mt-1.5 flex flex-wrap gap-1 text-[9px] font-mono items-center">
+                        <span className="text-zinc-500">Sources:</span>
+                        {(m as any).contextSources.liveState && <span className="px-1 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/20">Live state</span>}
+                        {(m as any).contextSources.liveHistory && <span className="px-1 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/20">Live history</span>}
+                        {(m as any).contextSources.moss && <span className="px-1 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/20">Moss</span>}
+                        {!(m as any).contextSources.moss && (m as any).mossBackend === 'local' && (m as any).mossLatency !== undefined && (m as any).mossLatency !== 0 && <span className="px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/20">Local</span>}
+                      </div>
+                    )}
+                    {(m as any).historySummary && (
+                      <div className="mt-1 text-[10px] font-mono text-zinc-400 bg-black/20 rounded px-2 py-1 border border-white/5 line-clamp-2">
+                        {(m as any).historySummary.slice(0, 180)}
                       </div>
                     )}
                   </div>
@@ -697,7 +752,7 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
               <h4 className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-2">
                 <Zap className="w-3.5 h-3.5 text-[#2ed573]" /> Quick Voice Dispatch Prompts
               </h4>
-              <span className="text-[10px] font-mono text-zinc-500">1-Click Dispatch &bull; Moss-grounded answers</span>
+              <span className="text-[10px] font-mono text-zinc-500">1-Click Dispatch &bull; {isMossBackend ? 'Moss-grounded answers' : 'Local index answers'}</span>
             </div>
             <div className="flex flex-wrap gap-2">
               {quickPrompts.map((qp, idx) => (
@@ -715,14 +770,14 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
           </div>
         </div>
 
-        {/* Right Column: Moss Retrieval Inspector (live, measured) */}
+        {/* Right Column: Retrieval Inspector — MOSS vs LOCAL clarity */}
         <div className="space-y-4">
           <div className="p-5 rounded-2xl bg-[#09091b] border border-[#2ed573]/30 shadow-xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-white/10">
               <div className="flex items-center gap-2">
                 <Search className="w-4 h-4 text-[#2ed573]" />
                 <h3 className="text-xs font-bold uppercase tracking-wider text-white">
-                  Retrieval Inspector
+                  {isMossBackend ? 'MOSS RETRIEVAL' : 'LOCAL FALLBACK'}
                 </h3>
               </div>
               <span className={`px-2 py-0.5 text-[9px] font-mono rounded border font-bold ${
@@ -730,103 +785,105 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
                   ? 'bg-[#2ed573]/20 text-[#2ed573] border-[#2ed573]/30'
                   : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
               }`}>
-                {!isMossBackend ? 'Local fallback' : lastMossData?.mode === 'cloud' ? 'Moss Cloud' : 'Moss'}
+                {!isMossBackend ? 'Local fallback' : lastMossData?.mode === 'cloud' ? 'Moss Cloud' : 'Moss (in-process)'}
               </span>
             </div>
 
-            {/* Latency Meter */}
-            <div className="p-3.5 rounded-xl bg-[#121230] border border-white/5 space-y-2">
-              <div className="flex items-center justify-between text-xs font-mono">
-                <span className="text-zinc-400">Context Lookup Speed</span>
-                <span className="text-lg font-black text-[#2ed573]">
-                  {lastMossData ? `${lastMossData.latencyMs} ms` : '—'}
-                </span>
+            {/* Retrieval Breakdown — uses actual response metadata, never hardcoded */}
+            {lastMossData ? (
+              isMossBackend ? (
+                <div className="p-3.5 rounded-xl bg-[#121230] border border-white/5 space-y-1.5">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">Measured Retrieval</div>
+                  {lastMossData.searchMs !== undefined && (
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <span className="text-zinc-400">Moss search</span>
+                      <span className="text-emerald-400 font-mono">{lastMossData.searchMs} ms</span>
+                    </div>
+                  )}
+                  {lastMossData.embedMs !== undefined && (
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <span className="text-zinc-400">Query embedding</span>
+                      <span className="text-sky-300 font-mono">{lastMossData.embedMs} ms</span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between text-xs font-mono pt-1.5 border-t border-white/5 font-bold">
+                    <span className="text-white">Total retrieval</span>
+                    <span className="text-[#2ed573] font-mono">{lastMossData.latencyMs} ms</span>
+                  </div>
+                  {/* Keep wallClock if differs, but latencyMs is total as defined by server */}
+                  {lastMossData.wallClockMs !== undefined && lastMossData.wallClockMs !== lastMossData.latencyMs && (
+                    <div className="text-[10px] font-mono text-zinc-500">Wall clock: {lastMossData.wallClockMs} ms</div>
+                  )}
+                </div>
+              ) : (
+                <div className="p-3.5 rounded-xl bg-[#121230] border border-amber-500/20 space-y-1.5">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-amber-300">Measured Retrieval</div>
+                  <div className="flex items-center justify-between text-xs font-mono font-bold">
+                    <span className="text-white">Keyword search</span>
+                    <span className="text-amber-300 font-mono">{lastMossData.latencyMs} ms</span>
+                  </div>
+                  <div className="text-[10px] font-mono text-zinc-500">Local keyword index — no embedding step</div>
+                </div>
+              )
+            ) : (
+              <div className="p-3.5 rounded-xl bg-[#121230] border border-white/5">
+                <div className="text-xs font-mono text-zinc-500">Say something to run a lookup</div>
               </div>
-              <div className="w-full bg-black/40 h-2 rounded-full overflow-hidden p-0.5 border border-white/5">
-                <div
-                  className="h-full bg-gradient-to-r from-[#2ed573] to-[#1e90ff] rounded-full"
-                  style={{
-                    width: `${Math.min(100, ((lastMossData?.latencyMs ?? 0) / 10.0) * 100)}%`
-                  }}
-                />
-              </div>
-              <div className="flex justify-between text-[10px] font-mono text-zinc-500">
-                <span>0 ms</span>
-                <span className={`font-semibold ${lastMossData ? (lastMossData.latencyMs < 10 ? 'text-emerald-400' : 'text-amber-400') : 'text-zinc-500'}`}>
-                  {lastMossData
-                    ? `10 ms target: ${lastMossData.latencyMs < 10 ? 'met' : 'missed'} (${lastMossData.latencyMs} ms)`
-                    : 'Say something to run a lookup'}
-                </span>
-                <span>10 ms</span>
-              </div>
-            </div>
+            )}
 
-            {/* Live measurements */}
+            {/* Live measurements — minimal */}
             <div className="p-3.5 rounded-xl bg-[#0e0e28] border border-white/5 space-y-1.5 text-xs text-zinc-300">
               <div className="font-bold text-white flex items-center gap-1.5 text-[11px] uppercase tracking-wide">
                 <Layers className="w-3.5 h-3.5 text-sky-400" /> Live measurements
               </div>
-              <div className="text-[11px] text-zinc-400 leading-relaxed font-mono space-y-0.5">
-                <div>Engine: {lastMossData?.retrievalEngine ?? (isMossBackend ? 'Moss (in-process)' : 'Local keyword index (fallback, not Moss)')}</div>
-                <div>
-                  Lookups ({activeBackend}): {backendStats?.count ?? 0}
-                  {backendStats?.count ? ` | p50 ${backendStats.p50} ms | p95 ${backendStats.p95} ms | max ${backendStats.max} ms` : ''}
+              <div className="text-[11px] text-zinc-400 leading-relaxed font-mono space-y-1">
+                <div>Engine: {isMossBackend ? 'Semantic retrieval' : 'Keyword retrieval'}</div>
+                {isMossBackend && (
+                  <div>Embedding: {retrievalStats?.status?.embeddings ?? 'Xenova/all-MiniLM-L6-v2 (local)'} <span className="text-zinc-500">(local)</span></div>
+                )}
+                <div>Lookups ({activeBackend}): {backendStats?.count ?? 0}</div>
+              </div>
+            </div>
+
+            {/* Source provenance — honest: Moss vs Local based on ACTUAL backend */}
+            {lastContextSources && (
+              <div className="p-3 rounded-xl bg-[#0e0e28] border border-white/5 space-y-1.5">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">Sources used</div>
+                <div className="flex flex-wrap gap-1.5 text-[10px] font-mono">
+                  {lastContextSources.liveState && <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30">Live state</span>}
+                  {lastContextSources.liveHistory && (
+                    <span className="px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30">
+                      Live history {lastHistorySampleCount != null ? `· ${lastHistorySampleCount} samples` : ''} {lastHistoryWindowMs ? `· ${Math.round(lastHistoryWindowMs/60000)}m` : ''}
+                    </span>
+                  )}
+                  {lastContextSources.moss && (
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                      Moss {lastMossData?.results[0]?.document.id ?? ''} · {lastMossData?.latencyMs ?? ''}ms
+                    </span>
+                  )}
+                  {!lastContextSources.moss && lastMossData?.backend === 'local' && lastMossData?.latencyMs !== undefined && lastMossData?.latencyMs !== 0 && (
+                    <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                      Local {lastMossData?.results[0]?.document.id ?? ''} · {lastMossData?.latencyMs ?? ''}ms
+                    </span>
+                  )}
+                  {!lastContextSources.liveState && !lastContextSources.liveHistory && !lastContextSources.moss && !(lastMossData?.backend === 'local' && lastMossData?.latencyMs !== 0) && (
+                    <span className="text-zinc-500">—</span>
+                  )}
                 </div>
-                {lastMossData?.embedMs !== undefined && (
-                  <div>Last lookup: query embedding {lastMossData.embedMs} ms + Moss search {lastMossData.searchMs} ms</div>
-                )}
-                {lastTimings && (
-                  <div>
-                    Last turn: retrieval {lastTimings.retrievalMs} ms{lastTimings.llmMs !== undefined ? ` | LLM ${lastTimings.llmMs} ms` : ''} | server {lastTimings.serverMs} ms | browser round trip {lastTimings.roundTripMs} ms
+                {lastHistorySummary && lastContextSources.liveHistory && (
+                  <div className="text-[11px] text-zinc-400 leading-relaxed font-mono bg-black/20 rounded p-2 border border-white/5">
+                    {lastHistorySummary.slice(0, 220)}
+                    {lastHistorySummary.length > 220 ? '…' : ''}
                   </div>
                 )}
-                {(!isMossBackend || retrievalStats?.status?.mode === 'cloud') && (
-                  <div className="text-amber-400">
-                    {retrievalStats?.status?.error
-                      ? `${retrievalStats.status.state === 'cloud' ? 'Moss note' : 'Moss unavailable'}: ${retrievalStats.status.error}`
-                      : retrievalStats?.status?.configured
-                      ? 'Moss is still starting up...'
-                      : 'Moss credentials not set. Add MOSS_PROJECT_ID and MOSS_PROJECT_KEY to .env.'}
-                  </div>
-                )}
+                <div className="text-[10px] font-mono text-zinc-500">
+                  {lastContextSources.liveState && 'Live state · '}
+                  {lastContextSources.liveHistory && 'Live history · '}
+                  {lastContextSources.moss ? 'Moss (semantic)' : lastMossData?.backend === 'local' && lastMossData?.latencyMs !== undefined && lastMossData?.latencyMs !== 0 ? 'Local index' : 'no retrieval'}
+                </div>
               </div>
-            </div>
+            )}
 
-            {/* Last Retrieved Context Documents */}
-            <div className="space-y-2">
-              <div className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 flex items-center justify-between">
-                <span>Authoritative Runbooks &amp; Specs</span>
-                <span className="text-[10px] font-mono text-zinc-500">
-                  {lastMossData?.results.length ?? 0} matched
-                </span>
-              </div>
-
-              <div className="space-y-2 max-h-[240px] overflow-y-auto pr-1">
-                {(lastMossData?.results || []).map((res, i) => (
-                  <div
-                    key={res.document.id + i}
-                    className="p-3 rounded-xl bg-[#131336] border border-white/5 space-y-1 hover:border-[#2ed573]/30 transition-all text-xs"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-zinc-200 text-[11px] truncate max-w-[170px]">
-                        {res.document.title}
-                      </span>
-                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">
-                        Score {res.score}
-                      </span>
-                    </div>
-                    <p className="text-[10.5px] text-zinc-400 line-clamp-2">
-                      {res.document.summary}
-                    </p>
-                    {res.document.actionableProtocol && (
-                      <div className="pt-1 text-[10px] text-emerald-400 font-mono">
-                        &gt; {res.document.actionableProtocol}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
           </div>
         </div>
       </div>

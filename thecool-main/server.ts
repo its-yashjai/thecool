@@ -12,6 +12,7 @@ import { Retriever } from "./server/retrieval.js";
 import { VoiceDispatcher } from "./server/voice.js";
 import { createLiveKitToken, livekitConfigured, livekitRoomName } from "./server/livekit.js";
 import { llmStatus, askAgent } from "./server/llm.js";
+import { TelemetryHistory } from "./server/telemetryHistory.js";
 
 async function startServer() {
   const app = express();
@@ -22,6 +23,11 @@ async function startServer() {
 
   // Simulation engine instance
   const engine = new SimulationEngine();
+
+  // Live telemetry history — rolling 10m buffer from authoritative engine state
+  const telemetryHistory = new TelemetryHistory({ maxMinutes: 10, tickIntervalMs: 600 });
+  // Seed with initial snapshot
+  telemetryHistory.push(engine.fullSnapshot());
 
   // Retrieval: real Moss (in-process semantic search) with an honest local fallback.
   // Initialisation runs in the background so the server starts immediately.
@@ -84,18 +90,69 @@ async function startServer() {
     res.json({ status: retriever.status(), latency: retriever.stats() });
   });
 
+  // Live telemetry history (lightweight)
+  app.get("/api/telemetry/history", (req, res) => {
+    const windowMs = Math.min(10 * 60 * 1000, Math.max(60 * 1000, Number(req.query.windowMs) || 5 * 60 * 1000));
+    const data = telemetryHistory.summaryForApi(windowMs);
+    res.json({
+      ...data,
+      // Do not return unlimited stream — only summary + current
+      windowMs: data.windowMs,
+      sampleCount: data.sampleCount,
+      oldestTimestamp: data.oldestTimestamp,
+      newestTimestamp: data.newestTimestamp,
+      current: data.current,
+      summary: data.summary,
+      totalSamples: data.totalSamples,
+      maxSamples: data.maxSamples,
+    });
+  });
+
+  app.post("/api/moss/mode", (req, res) => {
+    const mode = String(req.body.mode || "").trim().toLowerCase();
+    if (mode !== 'moss' && mode !== 'local' && mode !== 'auto') {
+      return res.status(400).json({ error: "mode must be 'moss', 'local' or 'auto'" });
+    }
+    retriever.setForcedBackend(mode as any);
+    const s = retriever.status();
+    console.log(`[retrieval] Retrieval mode forced to: ${mode} (activeBackend=${s.activeBackend}, mode=${s.mode})`);
+    res.json({ status: s, latency: retriever.stats() });
+  });
+
   // ── LiveKit & Voice Operator Endpoints ──────────────────────────
   app.post("/api/voice/dispatch", async (req, res) => {
     const t0 = process.hrtime.bigint();
     const transcript = String(req.body.transcript || "");
     const participant = String(req.body.participant || "operator");
-    const mossResult = await retriever.search(transcript, 3);
-    const response = await voiceDispatcher.respond(transcript, engine, mossResult, participant);
+    // Only call Moss/local retrieval when the query actually needs it
+    const preview = voiceDispatcher.previewSources(transcript);
+    let mossResult: any;
+    if (preview.moss) {
+      mossResult = await retriever.search(transcript, 3);
+    } else {
+      // No retrieval needed — create a no-op result so provenance is honest and latency is 0
+      mossResult = {
+        query: transcript,
+        results: [],
+        latencyMs: 0,
+        latencyMicroseconds: 0,
+        backend: 'local' as const,
+        mode: 'local' as const,
+        retrievalEngine: 'none',
+        sub10msGuaranteed: true,
+        totalDocsIndexed: retriever.status().docCount,
+        timestamp: new Date().toISOString(),
+        wallClockMs: 0,
+      };
+    }
+    const response = await voiceDispatcher.respond(transcript, engine, mossResult, participant, telemetryHistory);
     const serverMs = Math.round((Number(process.hrtime.bigint() - t0) / 1_000_000) * 100) / 100;
     response.livekitSession.latencyMs = serverMs;
     response.timings = { retrievalMs: mossResult.latencyMs, serverMs, llmMs: response.timings?.llmMs };
     // If command modified engine state, broadcast to all listeners
-    broadcast(engine.fullSnapshot());
+    const snap = engine.fullSnapshot();
+    telemetryHistory.push(snap);
+    broadcast(snap);
     res.json(response);
   });
 
@@ -163,6 +220,7 @@ async function startServer() {
       if (batch !== undefined) engine.batch = Number(batch);
     }
     const snap = engine.fullSnapshot();
+    telemetryHistory.push(snap);
     broadcast(snap);
     res.json(snap);
   });
@@ -210,7 +268,9 @@ async function startServer() {
           if (msg.users !== undefined) engine.users = Number(msg.users);
           if (msg.batch !== undefined) engine.batch = Number(msg.batch);
         }
-        broadcast(engine.fullSnapshot());
+        const snap = engine.fullSnapshot();
+        telemetryHistory.push(snap);
+        broadcast(snap);
       } catch (e) {
         console.error("Invalid WS message", e);
       }
@@ -221,6 +281,7 @@ async function startServer() {
   setInterval(() => {
     if (engine.running) {
       const state = engine.step();
+      telemetryHistory.push(state);
       broadcast(state);
     }
   }, 600);

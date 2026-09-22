@@ -121,6 +121,24 @@ export interface VoiceAgentResponse {
   answeredBy?: 'rules' | 'llm';
   timings?: { retrievalMs: number; serverMs: number; llmMs?: number };
   timestamp: string;
+  // Live history + provenance (new)
+  contextSources?: {
+    liveState: boolean;
+    liveHistory: boolean;
+    moss: boolean;
+  };
+  historyWindowMs?: number;
+  historySampleCount?: number;
+  historySummary?: string | null;
+  liveStateSnapshot?: {
+    nf_T: number;
+    pid_T: number;
+    nf_fan: number;
+    power: number;
+    ai_reqs: number;
+    running: boolean;
+    forecastWorst?: number | null;
+  };
 }
 
 export interface ClusterWarning {
@@ -159,5 +177,11 @@ export interface VoiceMessage {
     fanSpeed?: number;
     controller?: string;
   };
+  contextSources?: {
+    liveState: boolean;
+    liveHistory: boolean;
+    moss: boolean;
+  };
+  historySummary?: string | null;
 }
 

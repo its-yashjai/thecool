@@ -86,6 +86,17 @@ export interface LiveState {
   forecastWorstC?: number;
   running?: boolean;
   aiReqs?: number;
+  // extended for multi-source
+  pidC?: number;
+  apiReqs?: number;
+  users?: number;
+  batch?: number;
+}
+
+export interface LiveHistoryContext {
+  summary: string | null;
+  windowMs: number;
+  sampleCount: number;
 }
 
 function buildSystemPrompt(state: LiveState, moss: MossSearchResponse): string {
@@ -113,6 +124,60 @@ RULES:
 - Never invent numbers. Quote temperatures and fan speeds only from the live state.
 - When you use a document, name its runbook or reference id naturally, for example "per RB-01".
 - You cannot perform actions in this reply. If the operator asks you to do something, tell them the exact command to say, such as "start simulation" or "pre-ramp fans".`;
+}
+
+function buildMultiSourcePrompt(
+  state: LiveState,
+  history: LiveHistoryContext | null,
+  moss: MossSearchResponse | null,
+  opts?: { includeLiveState: boolean; includeHistory: boolean; includeMoss: boolean }
+): string {
+  const includeLiveState = opts?.includeLiveState ?? true;
+  const includeHistory = opts?.includeHistory ?? !!history;
+  const includeMoss = opts?.includeMoss ?? !!moss;
+
+  const f = (n: number | undefined, unit: string) => (typeof n === 'number' ? `${n.toFixed(1)}${unit}` : 'unknown');
+
+  let liveStateBlock = '';
+  if (includeLiveState) {
+    liveStateBlock = `[LIVE STATE]\nCurrent values right now:\n` +
+      `junction ${f(state.junctionC, ' C')} (PID ${f(state.pidC, ' C')}), fan ${f(state.fanPct, '%')}, power ${f(state.powerW, ' W')}, forecast worst ${f(state.forecastWorstC, ' C')}, workload ${state.aiReqs ?? 'unknown'} req/s (API ${state.apiReqs ?? 'unknown'}, users ${state.users ?? 'unknown'}, batch ${state.batch ?? 'unknown'}), running ${state.running ? 'yes' : 'paused'}.\n`;
+  }
+
+  let historyBlock = '';
+  if (includeHistory) {
+    if (history && history.sampleCount > 0 && history.summary) {
+      historyBlock = `[LIVE HISTORY]\nRecent telemetry from rolling buffer (last ${Math.round(history.windowMs/60000)}m, ${history.sampleCount} samples):\n${history.summary}\n` +
+        `Note: This is actual live simulator telemetry, not synthetic KB. If insufficient history, say so.\n`;
+    } else {
+      historyBlock = `[LIVE HISTORY]\nNo live history yet (0 samples or insufficient window). Simulation may be paused or just started. Do not invent telemetry.\n`;
+    }
+  }
+
+  let mossBlock = '';
+  if (includeMoss && moss && moss.results.length > 0) {
+    const docs = moss.results.slice(0, 3).map((r,i) => {
+      const d = r.document;
+      return `[${i+1}] (${d.id}) ${d.title}. ${d.summary} ${d.content.slice(0, 380)}${d.actionableProtocol ? ' Action: ' + d.actionableProtocol : ''}`;
+    }).join('\n');
+    mossBlock = `[MOSS CONTEXT]\n96-document project knowledge (runbooks, guardrails, incidents, hardware, lessons) — synthetic historical/reference knowledge, not live telemetry:\n${docs}\n`;
+  } else if (includeMoss) {
+    mossBlock = `[MOSS CONTEXT]\nNo Moss documents retrieved for this query (or Moss unavailable). Use local knowledge only if relevant.\n`;
+  }
+
+  return `You are NeuralFlow, a voice co-pilot for a GPU cluster thermal-management demo. You are speaking out loud to an operator.
+
+${liveStateBlock}${historyBlock}${mossBlock}
+RULES:
+- Use ONLY provided live telemetry for current/recent numerical claims. Do not invent missing telemetry.
+- Use Moss documents for project procedures, historical incidents, guardrails, and engineering knowledge. Label them as historical/reference knowledge.
+- Distinguish actual current history from synthetic incident documents.
+- If evidence is insufficient, say so.
+- Keep spoken answers concise (<=40 words) unless user asks for details, plain English, no markdown.
+- Never invent numbers. Quote temps/fan only from LIVE STATE/HISTORY.
+- When you use a document, name its id naturally, e.g. "per RB-01" or "similar to INC-2026-02".
+- You cannot perform simulator actions. If asked to act, tell exact command to say.
+- Retain source provenance: LIVE STATE is current, LIVE HISTORY is recent telemetry, MOSS is synthetic KB.`;
 }
 
 function buildAgentPrompt(transcript: string, moss: MossSearchResponse | null): string {
@@ -197,6 +262,41 @@ export async function askLlm(
     if (!text) throw new Error('LLM returned an empty answer');
     const words = text.split(' ');
     const spoken = words.length > 60 ? words.slice(0, 60).join(' ') + '.' : text;
+    return { text: spoken, ms: Math.round((performance.now() - t0) * 10) / 10, model: cfg.model };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function askLlmMulti(
+  transcript: string,
+  state: LiveState,
+  history: LiveHistoryContext | null,
+  moss: MossSearchResponse | null,
+  opts?: { includeLiveState: boolean; includeHistory: boolean; includeMoss: boolean }
+): Promise<{ text: string; ms: number; model: string }> {
+  const { cfg, client } = load();
+  if (!cfg || !client) throw new Error('LLM not configured');
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
+  const t0 = performance.now();
+  try {
+    const res = await client.chat.completions.create(
+      {
+        model: cfg.model,
+        messages: [
+          { role: 'system', content: buildMultiSourcePrompt(state, history, moss, opts) },
+          { role: 'user', content: transcript },
+        ],
+        temperature: 0.2,
+        max_tokens: 600,
+      },
+      { signal: ctrl.signal }
+    );
+    const text = clean(res.choices[0]?.message?.content ?? '');
+    if (!text) throw new Error('LLM returned an empty answer');
+    const words = text.split(' ');
+    const spoken = words.length > 80 ? words.slice(0, 80).join(' ') + '.' : text;
     return { text: spoken, ms: Math.round((performance.now() - t0) * 10) / 10, model: cfg.model };
   } finally {
     clearTimeout(timer);

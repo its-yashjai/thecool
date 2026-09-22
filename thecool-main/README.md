@@ -15,7 +15,7 @@ Inspired by **LEAP 71 Noyron (2024)** — AI that encodes physical laws outperfo
 
 1. `npm install`
 2. Copy `.env.example` to `.env.local` and fill in:
-   - `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY` (Moss dashboard)
+   - `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY` (Moss dashboard) — **rotate later in Render Dashboard without redeploying code**
    - `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` (free project at cloud.livekit.io)
 3. `npm run check:moss` creates the Moss index, tries in-process load, benchmarks 60 queries and writes `bench/moss-results.json`.
 4. `npm run dev`, open http://localhost:3000, allow the microphone.
@@ -25,9 +25,46 @@ How it works:
 - Action commands ("start simulation", "pre-ramp fans", "emergency cooling") are handled by deterministic intent rules, so they are instant and never depend on an LLM.
 - Knowledge questions ("what does RB-01 say", "why does reactive cooling fail") are answered from documents Moss retrieves. If an OpenAI-compatible LLM is configured (`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`; verify with `npm run check:llm`), it phrases the answer from those documents and the live cluster numbers. It cannot trigger actions, and any failure falls back to the rule-based answer.
 - The browser joins a real LiveKit room using a server-signed token, publishes the microphone, and shares each turn over the data channel, so a second device in the room sees the live transcript.
-- Retrieval order: Moss in-process, then Moss Cloud (network), then a local keyword index. The UI always shows which one served the answer and the measured latency.
+- Retrieval order: Moss in-process (local embeddings `Xenova/all-MiniLM-L6-v2`, 96 docs, p50 ~6ms), then Moss Cloud (network), then a local keyword index. The UI always shows which one served the answer and the measured latency (`Moss (in-process)` vs `Local fallback` + `Sources: Live state · Live history · Moss/Local`).
 
 All latency numbers in the UI are measured at runtime. Cite `bench/moss-results.json` for benchmark figures.
+
+## Deploy to Render (this repo only — `v5` stays untouched)
+
+This `v7neuralflow` clone is deploy-ready. `v5` (`Y:/v5`) is not modified or pushed.
+
+**Render settings (Web Service):**
+
+- **Repo:** `its-yashjai/thecool` branch `v5` or your `v7` branch — Root Directory = `thecool-main` (or `Y:/v7neuralflow/thecool-main` if you push this folder)
+- **Build Command:** `npm install && npm run build`
+- **Start Command:** `npm start`  (serves `dist/` + Express on `$PORT`)
+- **Node:** `20.x` (auto via `package.json` `tsx`)
+- **Health Check:** `/health` → `{"status":"ok"}`
+
+**Environment variables (Render Dashboard → Environment → Add):**
+
+```
+MOSS_PROJECT_ID=c6966a01-c5e6-4a40-9609-60009e4da5af   # or new project
+MOSS_PROJECT_KEY=moss_...                             # ← rotate here anytime; no code change needed
+MOSS_INDEX_NAME=neuralflow-kb
+MOSS_EMBEDDINGS=local
+LIVEKIT_URL=wss://ycc-toobrjpd.livekit.cloud
+LIVEKIT_API_KEY=APIe4BBhP5nEyx3
+LIVEKIT_API_SECRET=mrbkt5I3f4L60YljAr0pTRoybRVJsHeQSwebuvpdeleG
+LLM_API_KEY=sk-sCgMQUoBpKoF3QfM1_-UV9iQXpW1XPiBmpASI9XeZ0I
+LLM_BASE_URL=https://llm.hidevs.xyz/v1
+LLM_MODEL=gemini-3.6-flash
+```
+
+> **Moss key rotation:** Change `MOSS_PROJECT_KEY` (and `MOSS_PROJECT_ID` if you create a new Moss project) directly in Render → Environment → Save → Manual Deploy. The app re-creates/syncs the `neuralflow-kb` index on boot; existing docs are upserted, never deleted. If quota is exhausted you will see `LOCAL KEYWORD FALLBACK (Moss configured but unavailable)` in logs — the app still answers honestly as `Local` (fixed in `server/voice.ts:221`).
+
+**Verify after deploy:**
+
+```bash
+curl https://your-app.onrender.com/api/health
+curl https://your-app.onrender.com/api/moss/stats  # activeBackend: moss|local
+curl https://your-app.onrender.com/api/telemetry/history?windowMs=300000
+```
 
 ## Quick Start
 
@@ -42,7 +79,7 @@ npm run dev
 npm run build
 ```
 
-The application will be live at `http://localhost:3000`.
+The application will be live at `http://localhost:3000` (or `$PORT` on Render, e.g. `https://your-app.onrender.com`).
 
 ---
 
@@ -50,7 +87,7 @@ The application will be live at `http://localhost:3000`.
 
 | Component | Path | Description |
 |-----------|------|-------------|
-| **Retrieval (Moss)** | `server/retrieval.ts`, `server/knowledge.ts` | Real Moss SDK (semantic + keyword hybrid) over a 24-document knowledge base of hardware specs, runbooks, guardrails. Falls back to `server/moss.ts` (local keyword index, clearly labeled) if Moss is unavailable |
+| **Retrieval (Moss)** | `server/retrieval.ts`, `server/knowledge.ts` (96 docs), `server/telemetryHistory.ts` | Real Moss SDK (semantic + keyword hybrid) over a 96-document knowledge base + 10-min rolling live telemetry history (bounded 1000 snapshots). Falls back to `server/moss.ts` (local keyword index, honest `Local fallback` labeling) if Moss quota is exhausted |
 | **Voice Dispatcher** | `server/voice.ts` | Real-time speech operator with LiveKit WebRTC session management and physics actuation |
 | **Voice Ops Console** | `src/components/VoiceOperator.tsx` | LiveKit room status, voice visualizer waveform, and a live retrieval inspector showing measured Moss latency |
 | **Thermal Simulator** | `server/simulator.ts` | GPU digital twin: Runge-Kutta 4th-order (RK4) integration of Newton's Law of Cooling |
