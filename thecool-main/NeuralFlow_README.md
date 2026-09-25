@@ -347,7 +347,7 @@ timeline
 
 ## 🏷️ Deploy (Render)
 
-`render.yaml` deploys branch `v8` with root directory `thecool-main`: build `npm ci && npm run build`, start `npm start`, health check `/health`. Set the environment variables above in the Render dashboard, then check:
+`render.yaml` deploys branch `v7` (the live Render service) with root directory `thecool-main`: build `npm ci && npm run build`, start `npm start`, health check `/health`. Set the environment variables above in the Render dashboard, then check:
 
 ```bash
 curl https://your-app.onrender.com/api/health
