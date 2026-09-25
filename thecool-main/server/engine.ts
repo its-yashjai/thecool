@@ -71,7 +71,7 @@ export class SimulationEngine {
   constructor() {
     this.sim = new GPUThermalSimulator();
     this.pid_ctrl = new PIDController(2.0, 0.1, 0.5, 70.0);
-    this.nf_ctrl = new NeuralFlowController(80.0);
+    this.nf_ctrl = new NeuralFlowController(80.0, this.sim.C, this.sim.k);
 
     // 3x3 GPU cluster random thermal dissipation offsets
     this.gpu_offsets = [
@@ -188,10 +188,10 @@ export class SimulationEngine {
       }
     }
 
-    // PINN forecast
+    // PINN forecast (at the fan speed actually applied)
     let forecast = null;
     if (this.nf_ctrl.window.length >= 25) {
-      const pred = this.nf_ctrl.predictUncertainty();
+      const pred = this.nf_ctrl.predictUncertainty(this.nf_fan);
       forecast = {
         worst: Number(pred.worstCase.toFixed(1)),
         mean: Number(pred.mean.toFixed(1)),
@@ -239,7 +239,7 @@ export class SimulationEngine {
 
     let forecast = null;
     if (this.nf_ctrl.window.length >= 25) {
-      const pred = this.nf_ctrl.predictUncertainty();
+      const pred = this.nf_ctrl.predictUncertainty(this.nf_fan);
       forecast = {
         worst: Number(pred.worstCase.toFixed(1)),
         mean: Number(pred.mean.toFixed(1)),
@@ -272,7 +272,7 @@ export class SimulationEngine {
   static runBatch(pattern = 'mixed', duration = 600): SimulationResult {
     const sim = new GPUThermalSimulator();
     const pid = new PIDController(2.0, 0.1, 0.5, 70.0);
-    const nf = new NeuralFlowController(80.0);
+    const nf = new NeuralFlowController(80.0, sim.C, sim.k);
 
     let pid_T = sim.T_ambient + 15.0;
     let nf_T = sim.T_ambient + 15.0;

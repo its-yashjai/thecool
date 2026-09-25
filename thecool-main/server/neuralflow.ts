@@ -3,17 +3,27 @@ export class NeuralFlowController {
   threshold: number;
   window: number[][];
   maxWindow = 30;
+  /** Thermal model the forecaster integrates; must match the plant (simulator) it controls. */
+  C: number;
+  k: number;
 
-  constructor(threshold = 80.0) {
+  constructor(threshold = 80.0, C = 500.0, k = 0.022) {
     this.threshold = threshold;
+    this.C = C;
+    this.k = k;
     this.window = [];
   }
+
+  /** Last fan command, for smooth ramp-down (no chatter). */
+  lastFan = 20;
 
   reset(): void {
     this.window = [];
+    this.lastFan = 20;
   }
 
-  predictUncertainty(): {
+  /** Forecast the next 30/45/60 s. `fanPct` = the fan to assume (default: the last one applied). */
+  predictUncertainty(fanPct?: number): {
     forecasts: [number, number, number];
     uncertainties: [number, number, number];
     worstCase: number;
@@ -34,9 +44,9 @@ export class NeuralFlowController {
     const powerStd = Math.sqrt(powerVar);
 
     // Physics ODE forward projection with heat capacity C=500, k=0.05
-    const C = 500.0;
-    const k = 0.05;
-    const effectiveFan = Math.max(fan_now, 20.0);
+    const C = this.C;
+    const k = this.k;
+    const effectiveFan = Math.max(fanPct ?? fan_now, 20.0);
     const k_eff = k * (0.5 + effectiveFan / 100.0);
 
     // Dynamic temperature integration over 30s, 45s, 60s
@@ -84,22 +94,20 @@ export class NeuralFlowController {
       return 20.0;
     }
 
-    const { worstCase } = this.predictUncertainty();
-    const headroom = this.threshold - worstCase;
-
-    let fanSpeed = 20.0;
-    if (headroom < 0) {
-      fanSpeed = 95.0; // Over threshold predicted: aggressive cooling
-    } else if (headroom < 3) {
-      fanSpeed = 70 + (3 - headroom) * 10; // High urgency pre-ramp
-    } else if (headroom < 10) {
-      fanSpeed = 30 + (10 - headroom) * 5.5; // Moderate pre-ramp
-    } else if (headroom < 20) {
-      fanSpeed = 20 + (20 - headroom) * 1.0; // Gentle pre-cooling
-    } else {
-      fanSpeed = 20.0; // Safe steady state
+    // Predictive control: forecast the next 60 s under each candidate fan speed and choose the LOWEST
+    // speed whose worst case (forecast + uncertainty) stays under the threshold. The old rule forecast
+    // with last second's fan, so it flipped between ~55% and 95% every tick.
+    let fanSpeed = 100;
+    for (let f = 20; f <= 100; f += 5) {
+      if (this.predictUncertainty(f).worstCase <= this.threshold) {
+        fanSpeed = f;
+        break;
+      }
     }
-
-    return Math.max(20, Math.min(100, fanSpeed));
+    // Ramp up immediately (safety), ramp down at most 5%/s (no chatter, no acoustic pumping)
+    if (fanSpeed < this.lastFan) fanSpeed = Math.max(fanSpeed, this.lastFan - 5);
+    fanSpeed = Math.max(20, Math.min(100, fanSpeed));
+    this.lastFan = fanSpeed;
+    return fanSpeed;
   }
 }

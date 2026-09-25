@@ -4,7 +4,9 @@ export class GPUThermalSimulator {
   k: number;
   T_ambient: number;
 
-  constructor(C_thermal = 500, k = 0.05, T_ambient = 25.0) {
+  // k calibrated so a 700 W H100 at the 20% fan floor settles near 90°C (above the 85°C throttle line)
+  // and at 100% fan near 67°C: a training burst genuinely threatens throttling, and cooling has to act.
+  constructor(C_thermal = 500, k = 0.022, T_ambient = 25.0) {
     this.C = C_thermal;
     this.k = k;
     this.T_ambient = T_ambient;
