@@ -1,726 +1,365 @@
-# NEURALFLOW
+<div align="center">
 
-### Physics-Informed GPU Thermal Management
+# ⚡ NeuralFlow
 
-> **Predict. Prevent. Perform.**
->
-> NeuralFlow is a real-time AI operations platform for proactive GPU thermal management. It combines physics-informed prediction, live telemetry, recent telemetry history, semantic retrieval with Moss, and Gemini-powered voice reasoning to help operators understand and control GPU thermal behavior before throttling occurs.
+### Voice-first thermal intelligence for GPU clusters
 
----
+**Predict the heat. Protect the compute. Just ask.**
 
-## ✦ What is NeuralFlow?
+![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
+![Node](https://img.shields.io/badge/Node.js-Express-339933?logo=node.js&logoColor=white)
+![Moss](https://img.shields.io/badge/Retrieval-Moss%20in--process-2ED573)
+![LiveKit](https://img.shields.io/badge/Realtime-LiveKit-FF4F00)
+![Gemini](https://img.shields.io/badge/LLM-Gemini%203.6%20Flash-8E75B2)
 
-Traditional GPU cooling is often reactive: temperature rises, a threshold is crossed, and the cooling system responds.
+*Built for the YC × Moss hackathon · Real-Time Voice & Conversational AI track*
 
-NeuralFlow is built around a different idea:
-
-> **Do not wait for the temperature to become dangerous. Understand where the system is heading, what just happened, what has happened before, and what action is safe next.**
-
-The platform combines four complementary information sources:
-
-| Source | Purpose |
-|---|---|
-| **Live State** | Understand what is happening right now |
-| **Live History** | Understand how the system changed recently |
-| **Moss Knowledge** | Retrieve runbooks, incidents, guardrails, hardware references, and engineering lessons |
-| **Gemini** | Combine available evidence into a grounded explanation or decision |
-
-NeuralFlow is designed as a **voice-first AI operations interface**, not simply a chatbot.
+</div>
 
 ---
 
-# ◈ Core Idea
+## 🌙 The 3 a.m. problem
 
-## Reactive control
+A training run is burning through thousands of GPUs. One rack crosses **85 °C**, the GPUs protect themselves and **cut their clocks by 30 %**, and the whole job slows down. Nobody notices for twenty minutes, because the on-call engineer is staring at ten dashboards.
 
-```mermaid
-flowchart LR
-    A["Workload rises"] --> B["Temperature rises"]
-    B --> C["Threshold crossed"]
-    C --> D["Cooling reacts"]
-    D --> E["Thermal overshoot / throttling risk"]
-```
-
-## NeuralFlow proactive control
+**NeuralFlow lets that engineer just ask.** It forecasts GPU temperature 60 seconds ahead, cools *before* the heat arrives, runs the incident by voice, and answers from the team's own runbooks and past incidents through **Moss**, in milliseconds.
 
 ```mermaid
 flowchart LR
-    A["Workload changes"] --> B["Thermal dynamics"]
-    B --> C["PINN forecast"]
-    C --> D["Predicted thermal risk"]
-    D --> E["Early cooling response"]
-    E --> F["Preserved thermal headroom"]
-```
-
-NeuralFlow treats the **future thermal trajectory** as an important control signal instead of relying only on the current sensor reading.
-
----
-
-# ⚡ Key Capabilities
-
-## 01 — Physics-Informed Prediction
-
-NeuralFlow uses a Physics-Informed Neural Network (PINN) to estimate future thermal behavior over a roughly **30–60 second predictive horizon**.
-
-A PID controller is retained as a reference baseline, making it possible to compare proactive prediction against conventional reactive control.
-
-### Prediction concept
-
-```mermaid
-flowchart LR
-    T["Current telemetry"] --> P["Physics-informed model"]
-    P --> F["30–60s forecast"]
-    F --> D["Thermal decision"]
+    subgraph Today["😰 Reactive cooling"]
+        direction LR
+        A1["Job starts"] --> A2["Temperature rises"] --> A3["Threshold crossed"] --> A4["Fans react late"] --> A5["🔥 Throttling"]
+    end
+    subgraph NF["😎 NeuralFlow"]
+        direction LR
+        B1["Job starts"] --> B2["Power jumps<br/>(leading signal)"] --> B3["60 s forecast"] --> B4["Fans ramp early"] --> B5["✅ Headroom kept"]
+    end
 ```
 
 ---
 
-## 02 — GPU Digital Twin
+## ✨ What it does
 
-The platform includes a GPU thermal simulation environment that acts as a digital twin of the monitored cluster.
+| | Capability | What you see |
+|---|---|---|
+| 🎙️ | **Voice operations** | Talk to the cluster: start a scenario, cool it, ask what happened. Hands off the keyboard. |
+| 🔮 | **Predictive cooling** | For every candidate fan speed, NeuralFlow forecasts 30/45/60 s ahead and picks the lowest speed that keeps the worst case under 80 °C. |
+| 🧠 | **Moss knowledge** | 96 runbooks, incidents, guardrails and hardware notes, searched semantically in-process. Paraphrased questions still find the right document. |
+| 📈 | **Live memory** | A rolling 10-minute telemetry buffer answers *"what happened over the last five minutes?"* from real data, not documents. |
+| 🧪 | **Live scenarios** | Play a training burst, inference or mixed workload on the live cluster at 1×, 5× or 10×. Every screen follows the same run. |
+| 🛡️ | **Safe by design** | Actions are deterministic rules. The LLM only phrases answers, never touches the hardware. |
+| 🔍 | **Honest provenance** | Every reply is labelled: live state, live history, Moss or local fallback, with measured milliseconds. |
 
-It models:
+---
 
-- GPU temperature
-- fan behavior
-- workload intensity
-- GPU power
-- cluster behavior
-- forecasted temperature
-- throttle events
-- thermal protection state
-
-The reference environment is represented as a **3 × 3 GPU cluster**, enabling spatial hotspot and workload-placement analysis.
+## 🏗️ Architecture
 
 ```mermaid
 flowchart TB
-    S["Simulation Engine"] --> G["3 × 3 GPU Cluster"]
-    G --> T["Temperature"]
-    G --> F["Fan"]
-    G --> P["Power"]
-    G --> W["Workload"]
-    G --> H["Thermal history"]
+    subgraph Browser["🖥️ Browser (React + Vite)"]
+        MIC["🎙️ Mic"] --> STT["Web Speech<br/>recognition"]
+        UI["Voice Ops · Control Room · Analytics"]
+        TTS["🔊 Speech synthesis"]
+    end
+
+    subgraph Server["⚙️ Node.js server"]
+        DISP["Voice dispatcher"]
+        ROUTE{"Question<br/>or command?"}
+        RULES["Deterministic<br/>action rules"]
+        SRC["Source selector"]
+        ENG["Simulation engine<br/>3×3 GPU cluster"]
+        HIST["Telemetry history<br/>rolling 10 min"]
+        RET["Retriever"]
+        LLM["Gemini 3.6 Flash<br/>(phrasing only)"]
+    end
+
+    subgraph Knowledge["📚 Knowledge"]
+        MOSS["Moss in-process index<br/>96 docs · MiniLM embeddings"]
+        LOCAL["Local keyword<br/>fallback"]
+    end
+
+    LK["LiveKit room<br/>shared turns"]
+
+    STT -->|transcript| DISP --> ROUTE
+    ROUTE -->|"command"| RULES --> ENG
+    ROUTE -->|"question"| SRC
+    SRC --> HIST
+    SRC --> RET
+    RET --> MOSS
+    RET -.->|"if Moss is down"| LOCAL
+    ENG -->|"0.6 s ticks"| HIST
+    SRC --> LLM
+    LLM -->|reply| TTS
+    ENG -->|"WebSocket stream"| UI
+    DISP --> LK
+```
+
+### One voice turn, end to end
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Op as 👩‍💻 Operator
+    participant B as Browser
+    participant S as Server
+    participant M as Moss (in-process)
+    participant H as Live history
+    participant G as Gemini
+
+    Op->>B: "Have we seen a similar thermal pattern before?"
+    B->>B: Speech → text (mic off while NeuralFlow speaks)
+    B->>S: POST /api/voice/dispatch
+    S->>S: Question, not a command → pick sources
+    par Knowledge
+        S->>M: semantic search (top 3)
+        M-->>S: INC-2026-08, RB-01, … (ms)
+    and Telemetry
+        S->>H: summarise last 5 min
+        H-->>S: 40 → 73 °C, fans 30 → 80 %, 0 throttling
+    end
+    S->>G: live state + history + Moss docs
+    G-->>S: grounded 40-word answer
+    S-->>B: reply + sources + timings
+    B->>Op: 🔊 spoken answer, card shows "Live history + Moss"
 ```
 
 ---
 
-## 03 — Real-Time Voice Operations
+## 🔮 Predictive control
 
-NeuralFlow is designed to accept natural spoken questions and operational commands.
+NeuralFlow watches **power draw**, which jumps the instant a job starts, while a reactive controller waits for the temperature to climb. Every tick it runs a small search over fan speeds:
 
-The current voice layer uses:
+```mermaid
+flowchart LR
+    T["📡 Telemetry<br/>T, power, fan"] --> W["Last 30 s window"]
+    W --> F{"For fan = 20, 25 … 100 %"}
+    F --> P["Integrate heat equation<br/>30 / 45 / 60 s ahead<br/>+ uncertainty band"]
+    P --> C{"Worst case<br/>≤ 80 °C?"}
+    C -->|"no"| F
+    C -->|"yes: lowest such fan"| R["Ramp up now<br/>ramp down ≤ 5 %/s"]
+    R --> A["🌀 Fan command"]
+    A --> T
+```
 
-- Silero VAD for local voice activity detection
-- Web Speech API for speech recognition
-- Web Speech API for speech synthesis
-- LiveKit for real-time room and participant communication
-- server-side retrieval and reasoning
+The plant is a first-order thermal model of an H100-class GPU (heat capacity, fan-dependent cooling, 25 °C ambient), calibrated so a 700 W burst at minimum fan heads toward ~90 °C. Cooling genuinely has to act.
 
-The voice interface can distinguish between questions and explicit control commands so that an informational question does not accidentally mutate the simulator.
+### Live result: 5-minute training burst
+
+| Controller | Peak temperature | Time above 85 °C | Fan energy |
+|---|---:|---:|---:|
+| Reactive PID (standard baseline) | 85.7 °C | ~50 s | 10.5 Wh |
+| **NeuralFlow** | **~73.5 °C** | **0 s** | 16.8 Wh |
+
+NeuralFlow keeps about **12 °C of headroom** and **never throttles**, and it spends more fan energy to do it. That's the right trade: a fan costs a few watts, while throttling costs 30 % of a 700 W GPU's clock. Ask the agent *"compare PID versus NeuralFlow"* and it runs a fresh benchmark on the spot.
+
+> These are simulator results, averaged over repeated runs, not measurements from a physical cluster. The baseline is a standard reactive PID; a carefully hand-tuned reactive controller narrows the gap in this idealised model, which has no sensor or fan lag.
 
 ---
 
-# 🧠 Multi-Source Grounding
+## 📚 Moss context engine
 
-Different questions require different evidence.
+Operators don't speak in runbook titles. Moss finds the right document even when the question shares no keywords with it.
 
-A simple current-state question should not require a historical search. A historical question should not be answered from a single current sensor reading. A question about a previous incident should be able to connect recent behavior with stored operational knowledge.
+```mermaid
+pie showData
+    title 96-document knowledge base
+    "Runbooks" : 21
+    "Reference / engineering" : 20
+    "Hardware" : 17
+    "Incidents" : 16
+    "Guardrails" : 14
+    "Telemetry scenarios" : 8
+```
+
+```mermaid
+flowchart LR
+    Q["🗣️ 'Was there a time fans stayed high<br/>after the load dropped?'"] --> E["MiniLM embedding<br/>(local)"]
+    E --> M["Moss in-process<br/>hybrid search"]
+    M --> D1["✅ INC-2026-06<br/>fans stuck high after burst"]
+    Q --> K["Keyword search"]
+    K --> D2["❌ RB-17<br/>sustained load"]
+```
+
+### Benchmark: 20 paraphrased operator questions, same 96 documents
+
+| Metric | 🟢 Moss | ⚪ Local keyword |
+|---|---:|---:|
+| Right document ranked first | **70 %** | 60 % |
+| Right document in top 3 | **95 %** | 80 % |
+| Median retrieval time | 13 ms | 1.9 ms |
+| 95th-percentile retrieval time | 30 ms | 5 ms |
+
+Moss finds the right knowledge far more often; keyword search is faster but wrong more often. In a separate 60-query in-process run, Moss's median was **6.5 ms** (p95 21 ms), with embeddings computed locally. Raw data: [`bench/moss-vs-local-96.json`](bench/moss-vs-local-96.json) and [`bench/moss-results.json`](bench/moss-results.json).
+
+> **Local embeddings ≠ local fallback.** Moss search uses a local embedding model (`Xenova/all-MiniLM-L6-v2`). The *local fallback* is a separate keyword index, used only when Moss is unavailable or deliberately selected, and every reply says which one answered.
+
+---
+
+## 🧭 Multi-source grounding
+
+Different questions need different evidence, and NeuralFlow never blurs what was **measured** with what was **remembered**.
 
 ```mermaid
 flowchart TD
-    Q["Operator question"] --> I{"What evidence is needed?"}
-
-    I -->|"Current state"| S["LIVE STATE"]
-    I -->|"Recent behavior"| H["LIVE HISTORY"]
-    I -->|"Runbook / incident / guardrail"| M["MOSS"]
-    I -->|"Combined reasoning"| C["LIVE STATE + LIVE HISTORY + MOSS"]
-
-    S --> G["Gemini"]
+    Q["🗣️ Operator"] --> I{"What does this<br/>question need?"}
+    I -->|"How hot right now?"| S["🟦 Live state"]
+    I -->|"What just happened?"| H["🟩 Live history"]
+    I -->|"What should I do?<br/>Seen this before?"| M["🟪 Moss knowledge"]
+    I -->|"Start / cool / reset"| A["🟥 Deterministic action"]
+    S --> G["Grounded answer<br/>with labelled sources"]
     H --> G
     M --> G
-    C --> G
-
-    G --> R["Grounded response"]
+    A --> X["Engine updated<br/>+ spoken confirmation"]
 ```
 
-### Example
-
-> **“What has happened to GPU-04 recently, and have we seen a similar thermal pattern before?”**
-
-The system can combine:
-
-**Live State** — current temperature, fan, workload, and power.
-
-**Live History** — the recent temperature and workload trajectory.
-
-**Moss** — previous incidents, procedures, guardrails, and engineering knowledge.
-
-**Gemini** — one explanation grounded in those sources.
+Questions are routed away from actions, even without a question mark: *"was there a time…"*, *"have we seen…"* and *"when should we pre-ramp?"* search knowledge and **never** change the cluster.
 
 ---
 
-# 📈 Live Telemetry History
+## 🎙️ Things to say
 
-NeuralFlow maintains a bounded rolling history instead of treating the current snapshot as the entire story.
-
-The current design keeps approximately **10 minutes of recent telemetry**, sampled around the simulator's **600 ms cadence**, for roughly **1,000 bounded snapshots**.
-
-A smaller query window, such as five minutes, can be requested without discarding the larger rolling buffer.
-
-```mermaid
-flowchart LR
-    A["Authoritative Simulation State"] --> B["Telemetry Snapshot"]
-    B --> C["Rolling 10-minute buffer"]
-    C --> D["History query"]
-    D --> E["Trend / peak / change analysis"]
-    E --> F["Gemini context"]
-```
-
-Live history is designed to answer questions such as:
-
-- What changed recently?
-- When did workload increase?
-- How quickly did GPU-04 heat up?
-- How did fan response change?
-- What was the recent peak?
-- Did workload rise before temperature rose?
-- Did the system begin recovering?
-
-Raw telemetry remains a runtime concern. Individual high-frequency readings are not treated as semantic knowledge documents.
-
----
-
-# 📚 Moss Context Engine
-
-Moss provides the semantic retrieval layer for NeuralFlow's project knowledge.
-
-The current knowledge base contains **96 documents** spanning:
-
-| Knowledge Area | Purpose |
+| Say | What happens |
 |---|---|
-| **Hardware** | GPU profiles, airflow, power, and thermal behavior |
-| **Runbooks** | Operational procedures and response strategies |
-| **Guardrails** | Thermal safety and control constraints |
-| **Incidents** | Historical/reference events and lessons |
-| **Telemetry / Scenarios** | Reference operational scenarios |
-| **Engineering** | Thermal reasoning, control, and retrieval concepts |
+| **"Run training burst scenario"** | Resets the cluster and plays a 10-minute burst at 5× (about 2 min real time) |
+| **"Run mixed scenario"** / **"Stop scenario"** | Idle → inference → burst on the live cluster / stop and hold |
+| **"Diagnose cluster temperature"** | Current junction, fan and the 60 s forecast |
+| **"Pre-ramp cooling fans"** | Fans to ≥ 80 %, held for 24 s |
+| **"Emergency maximum cooling"** | Fans to 100 %, held for 24 s |
+| **"Increase workload"** / **"Decrease workload"** | Steps AI, API, user and batch load within limits |
+| **"What happened over the last five minutes?"** | Spoken recap from live telemetry |
+| **"Have we seen a similar thermal pattern before?"** | Live history + Moss incidents |
+| **"When should we pre-ramp cooling fans?"** | Answer from runbooks via Moss |
+| **"Compare PID versus NeuralFlow"** | Runs a fresh 600 s benchmark and reads the result |
+| **"Start / pause / reset simulation"** | Controls the live engine |
 
-The knowledge base was expanded from 24 to 96 documents to create a more realistic retrieval environment.
+Every command also works typed into the command box.
 
-### Moss retrieval path
+---
 
-```mermaid
-flowchart LR
-    Q["Operator question"] --> E["Local embedding model"]
-    E --> X["Moss in-process retrieval"]
-    X --> D["Relevant NeuralFlow documents"]
-    D --> G["Gemini"]
-    G --> A["Grounded answer"]
+## 🚀 Quick start
+
+```bash
+git clone https://github.com/its-yashjai/thecool.git
+cd thecool && git checkout v8
+cd thecool-main
+npm install
+cp .env.example .env.local   # add your keys
+npm run dev                  # http://localhost:3000
 ```
 
-### Important terminology
-
-**Local embeddings ≠ Local fallback.**
-
-NeuralFlow uses `Xenova/all-MiniLM-L6-v2` locally as the embedding model in the Moss retrieval path.
-
-The **Local fallback** is a separate keyword-retrieval baseline used when Moss is unavailable or when the operator intentionally selects Local mode.
-
----
-
-# 🔬 Moss vs Local
-
-NeuralFlow includes a controlled Moss-vs-Local demonstration mode.
-
-The hidden retrieval control allows the same application to switch between:
-
-- **Moss semantic retrieval**
-- **Local keyword retrieval**
-
-while leaving the rest of the reasoning pipeline unchanged.
-
-```mermaid
-flowchart TD
-    Q["Same operator question"] --> T{"Retrieval backend"}
-
-    T --> M["MOSS"]
-    T --> L["LOCAL FALLBACK"]
-
-    M --> G["Same Gemini model"]
-    L --> G
-
-    G --> A["Final response"]
-```
-
-The comparison focuses on:
-
-- Top-1 relevance
-- Top-3 relevance
-- retrieved document identity
-- retrieval latency
-- behavior on paraphrased operator questions
-
-Raw retrieval scores are **not** compared directly across engines because their scoring semantics are not necessarily equivalent.
-
----
-
-# 📊 Retrieval Benchmark
-
-A 20-question paraphrased operator benchmark was run against the same 96-document knowledge base.
-
-| Metric | Moss | Local |
-|---|---:|---:|
-| **Top-1 relevant** | **70%** | 60% |
-| **Top-3 relevant** | **95%** | 80% |
-| **Median retrieval latency** | 12.95 ms | **1.85 ms** |
-| **P95 retrieval latency** | 30.2 ms | **4.97 ms** |
-
-### What the benchmark means
-
-The current benchmark shows a trade-off:
-
-> **Moss retrieved relevant knowledge more often on this paraphrased query set, while Local keyword retrieval was faster in the same benchmark.**
-
-This is intentional. The goal is not to make Local fail artificially. The goal is to measure whether semantic retrieval helps when the operator's vocabulary differs from the source text.
-
----
-
-# 🛰️ Historical + Knowledge Reasoning
-
-NeuralFlow can connect a current situation to previous project knowledge.
-
-```mermaid
-flowchart TD
-    Q["Operator question"] --> H["LIVE HISTORY"]
-    Q --> M["MOSS"]
-
-    H --> H1["Recent GPU trajectory"]
-    M --> M1["Historical incident / runbook"]
-
-    H1 --> G["Gemini"]
-    M1 --> G
-
-    G --> R["Combined explanation"]
-```
-
-For example:
-
-> **“What has happened to GPU-04 recently, and have we seen a similar thermal pattern before?”**
-
-can connect the actual recent telemetry trajectory with a relevant incident or operational procedure.
-
-The project intentionally distinguishes **live simulator history** from the **synthetic/reference historical records** stored in the knowledge base.
-
----
-
-# 🛡️ Safety-Oriented Intent Routing
-
-NeuralFlow separates **knowledge questions** from **operational commands**.
-
-This prevents questions such as:
-
-> “When should we increase workload?”
-
-from being interpreted as:
-
-> “Increase workload.”
-
-Interrogative wording takes precedence when the user is asking for information. Explicit operational commands remain available for simulator actions.
-
-```mermaid
-flowchart TD
-    Q["Voice input"] --> C{"Question or command?"}
-
-    C -->|"Knowledge question"| K["Retrieve / analyze"]
-    C -->|"Explicit command"| A["Validate action"]
-
-    K --> G["Gemini"]
-    A --> S["Safety / control logic"]
-
-    G --> R["Answer"]
-    S --> X["Simulator action"]
-```
-
-### Examples
-
-**Knowledge behavior**
-
-- “When should we pre-ramp cooling fans?”
-- “Why is GPU-04 hotter?”
-- “What happened during the previous incident?”
-
-**Action behavior**
-
-- “Increase workload.”
-- “Pre-ramp cooling fans.”
-- “Start simulation.”
-
-Informational questions are intended to remain **non-mutating**.
-
----
-
-# 🎙️ Voice Architecture
-
-```mermaid
-flowchart TD
-    MIC["Microphone"] --> WA["Web Audio"]
-    WA --> VAD["Silero VAD"]
-    WA --> STT["Web Speech Recognition"]
-
-    VAD --> TURN["Turn detection"]
-    STT --> TXT["Transcript"]
-
-    TURN --> D["Voice dispatch"]
-    TXT --> D
-
-    D --> R["Source selection"]
-
-    R --> LS["Live State"]
-    R --> LH["Live History"]
-    R --> MS["Moss / Local"]
-
-    LS --> G["Gemini 3.6 Flash"]
-    LH --> G
-    MS --> G
-
-    G --> TTS["Web Speech Synthesis"]
-    TTS --> OUT["Operator audio"]
-
-    D --> LK["LiveKit"]
-    LK --> P["Realtime room / shared turn data"]
-```
-
----
-
-# 🧩 System Architecture
-
-```mermaid
-flowchart TB
-    UI["NeuralFlow React UI"]
-
-    UI --> VO["Voice Operator"]
-    UI --> CR["Control Room"]
-    UI --> AN["Analytics"]
-    UI --> SIM["Simulation"]
-
-    VO --> VAPI["Voice Dispatch"]
-    VAPI --> IR["Intent & Source Router"]
-
-    IR --> TEL["Live State"]
-    IR --> HIST["Telemetry History"]
-    IR --> RET["Retriever"]
-
-    RET --> MOSS["Moss"]
-    RET --> LOCAL["Local keyword fallback"]
-
-    TEL --> LLM["Gemini 3.6 Flash"]
-    HIST --> LLM
-    MOSS --> LLM
-    LOCAL --> LLM
-
-    LLM --> RESP["Grounded response"]
-    RESP --> VO
-
-    SIM --> ENG["Simulation Engine"]
-    ENG --> PINN["NeuralFlow PINN"]
-    ENG --> PID["PID baseline"]
-    ENG --> TEL
-
-    UI --> LK["LiveKit"]
-    VO --> LK
-```
-
----
-
-# 🌡️ Thermal Control Model
-
-NeuralFlow uses layered control reasoning:
-
-**Current state** — where the cluster is now.
-
-**Thermal forecast** — where the temperature is heading.
-
-**Historical trajectory** — how the system reached its current state.
-
-**Operational knowledge** — what incidents and runbooks say.
-
-**Control policy** — what response is permitted within thermal guardrails.
-
-```mermaid
-flowchart LR
-    A["Observe"] --> B["Predict"]
-    B --> C["Retrieve context"]
-    C --> D["Reason"]
-    D --> E["Control"]
-    E --> F["Observe again"]
-    F --> A
-```
-
----
-
-# 📌 Reference Thermal Guardrails
-
-The reference project knowledge uses the following thresholds:
-
-| Threshold | Meaning |
-|---|---|
-| **74°C** | Pre-cooling boundary |
-| **82°C** | Stronger override / protection boundary |
-| **85°C** | Thermal throttling point |
-| **90°C** | Critical shutdown boundary |
-
-These values belong to the project's reference control policy and should be presented as project simulation/guardrail values rather than universal GPU specifications.
-
----
-
-# ⚙️ Reference Simulation Comparison
-
-The project reference simulation reports:
-
-| Metric | PID | NeuralFlow |
-|---|---:|---:|
-| Peak temperature | **84°C** | **71°C** |
-| Cooling energy | **148 Wh** | **129 Wh** |
-| Throttle events | **7** | **0** |
-| Temperature variance | **±8.2°C** | **±3.1°C** |
-| Energy saved | — | **12.8%** |
-| PINN MAE | — | **1.4°C** |
-| PINN RMSE | — | **1.9°C** |
-
-These are **project reference / simulation results**, not measurements from a physical production GPU cluster.
-
----
-
-# 🖥️ Operator Experience
-
-NeuralFlow is designed as an AI infrastructure command center rather than a generic analytics dashboard.
-
-The visual direction combines:
-
-**Premium glassmorphism**
-
-with
-
-**vibrant AI infrastructure**
-
-and
-
-**aerospace-inspired control-room visualization**.
-
-The interface emphasizes:
-
-- GPU cluster health
-- predictive thermal state
-- voice operations
-- cooling behavior
-- thermal analytics
-- retrieval provenance
-- recent history
-- control feedback
-
-### Retrieval transparency
-
-The interface distinguishes whether an answer used:
-
-**Moss**
-
-or
-
-**Local fallback**
-
-or
-
-**Live state / Live history**.
-
-This makes the reasoning path inspectable instead of hiding every response behind a generic “AI answer” label.
-
----
-
-# 🔎 Example Operator Questions
-
-### Live state
-
-> **“What is the cluster temperature right now?”**
-
-Uses current live state.
-
-### Recent history
-
-> **“What changed after the workload increased?”**
-
-Uses recent telemetry history and current state.
-
-### Knowledge
-
-> **“When should we pre-ramp cooling fans?”**
-
-Uses runbooks and guardrails.
-
-### Historical reasoning
-
-> **“Have we seen a similar thermal pattern before?”**
-
-Uses historical/reference knowledge.
-
-### Combined reasoning
-
-> **“What has happened to GPU-04 recently, and have we seen a similar thermal pattern before?”**
-
-Combines live state, live history, and project knowledge.
-
----
-
-# 🧠 What Makes the Architecture Different?
-
-NeuralFlow is not built around one static prompt.
-
-It separates the questions an infrastructure operator actually asks:
+Open it in **Chrome** (speech recognition), allow the microphone, and click once so the browser allows speech. Check the startup banner:
 
 ```text
-WHAT IS HAPPENING NOW?
-        ↓
-    LIVE STATE
-
-WHAT JUST HAPPENED?
-        ↓
-   LIVE HISTORY
-
-HAVE WE SEEN THIS BEFORE?
-        ↓
-       MOSS
-
-WHAT SHOULD WE DO?
-        ↓
-   GEMINI + GUARDRAILS
+──────── NeuralFlow status ────────
+Retrieval : Moss in-process (embeddings: Xenova/all-MiniLM-L6-v2 (local, semantic))  [index: neuralflow-kb, docs: 96]
+LiveKit   : real signed tokens, room neuralflow-ops
+LLM       : gemini-3.6-flash via llm.hidevs.xyz (open questions only)
+───────────────────────────────────
 ```
 
-The value comes from combining these sources without confusing their provenance.
+If it says `LOCAL KEYWORD FALLBACK`, Moss isn't configured or reachable. The app still works and says so on every answer.
+
+### Environment
+
+| Variable | Needed for | Notes |
+|---|---|---|
+| `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY` | Moss search | From [moss.dev](https://moss.dev) |
+| `MOSS_INDEX_NAME` | Moss search | Default `neuralflow-kb`; created on first start |
+| `MOSS_EMBEDDINGS=local` | Moss search | Recommended: local MiniLM vectors, no model download from Moss |
+| `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | Shared voice room | Optional; tokens are signed server-side |
+| `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` | Natural-language answers | Optional; any OpenAI-compatible API. Without it, answers come from rules and documents |
+
+Keys never leave the server.
 
 ---
 
-# 🏗️ Technology Stack
+## 🔌 API
 
-| Layer | Technology |
+| Endpoint | Purpose |
 |---|---|
-| Frontend | React 18 |
-| Build system | Vite |
-| Language | TypeScript |
-| Backend | Node.js + Express |
-| Realtime | WebSocket + LiveKit |
-| Voice activity detection | Silero VAD |
-| Speech recognition | Web Speech API |
-| Speech synthesis | Web Speech API |
-| Retrieval | Moss |
-| Local embedding model | Xenova/all-MiniLM-L6-v2 |
-| LLM | Gemini 3.6 Flash via HiDevs |
-| Predictive model | Physics-Informed Neural Network |
-| Baseline controller | PID |
-| Styling | Tailwind CSS |
-| Live history | Bounded in-memory rolling buffer |
+| `POST /api/voice/dispatch` | One voice turn: `{ transcript }` → reply, intent, sources, timings |
+| `POST /api/scenario` · `POST /api/scenario/stop` | Play `{ pattern, duration, speed }` on the live cluster / stop it |
+| `POST /api/moss/search` | Direct retrieval: `{ query, limit }` |
+| `POST /api/moss/mode` | Force `moss`, `local` or `auto` retrieval |
+| `GET /api/moss/stats` | Retrieval status and latency percentiles |
+| `GET /api/telemetry/history` | Rolling telemetry summary (`?windowMs=`) |
+| `POST /api/simulate` | Offline batch benchmark: `{ pattern, duration }` |
+| `POST /api/control` | `play`, `pause`, `reset`, workload `params` |
+| `GET /api/livekit/token` | Short-lived LiveKit access token |
+| `GET /health` · `GET /api/health` | Liveness · full status |
+| `WS /ws` | Live engine state every 0.6 s |
 
 ---
 
-# 🔐 Design Principles
+## 🗂️ Project structure
 
-### Evidence first
-
-Current telemetry, historical data, and knowledge are treated as separate sources.
-
-### Provenance matters
-
-The system distinguishes Moss from Local fallback instead of claiming Moss when it was not used.
-
-### Questions should not accidentally actuate
-
-Informational requests are routed away from simulator mutations.
-
-### Keep recent history lightweight
-
-Live history is bounded and kept in memory.
-
-### Avoid unnecessary infrastructure
-
-Recent live-history questions do not require Redis, Postgres, or a traditional external vector database in the current architecture.
-
-### Transparent retrieval
-
-The operator can inspect which retrieval path was used and what timing was measured.
+```text
+thecool-main/
+├── server.ts                 Express + WebSocket server, routes, tick loop
+├── server/
+│   ├── engine.ts             Live engine, scenarios, fan override, batch benchmark
+│   ├── simulator.ts          First-order GPU thermal model + workload patterns
+│   ├── neuralflow.ts         Predictive controller (forecast + fan search)
+│   ├── pid.ts                Reactive PID baseline
+│   ├── voice.ts              Intent routing, source selection, spoken replies
+│   ├── retrieval.ts          Moss client, in-process index, local fallback
+│   ├── embeddings.ts         Local MiniLM embeddings for Moss
+│   ├── knowledge.ts          96-document knowledge base
+│   ├── telemetryHistory.ts   Rolling 10-minute telemetry buffer
+│   ├── llm.ts                Grounded answer phrasing (optional)
+│   └── livekit.ts            Signed room tokens
+├── src/
+│   ├── context/VoiceContext.tsx   Mic, speech, turn-taking, dispatch
+│   └── components/                Voice Ops, Control Room, Analytics, 3D stack
+└── bench/                    Moss vs local retrieval benchmarks
+```
 
 ---
 
-# 🚀 Project Vision
+## 🛡️ Design principles
 
-NeuralFlow aims to move GPU infrastructure management from:
+- **Actions are rules, not guesses.** "Emergency cooling" does exactly the same thing every time; the LLM can't actuate anything.
+- **Questions never actuate.** Asking about workload never changes the workload.
+- **Provenance is always shown.** Moss vs local fallback, live data vs documents, measured milliseconds.
+- **Graceful degradation.** No Moss → keyword fallback. No LLM → rule and document answers. No LiveKit → local voice. The demo never stalls.
+- **No overclaiming.** Simulator results are labelled as such, and the benchmarks ship with their raw data.
 
-> **Reactive monitoring**
+---
 
-to:
-
-> **Predictive, explainable, voice-driven operations.**
-
-The long-term loop is:
-
-**Observe** real-time infrastructure state.
-
-**Predict** future thermal behavior.
-
-**Remember** recent events and previous incidents.
-
-**Retrieve** relevant operational knowledge.
-
-**Reason** over multiple evidence sources.
-
-**Act** within explicit safety boundaries.
+## 🛣️ Roadmap
 
 ```mermaid
-flowchart LR
-    O["Observe"] --> P["Predict"]
-    P --> R["Remember"]
-    R --> K["Retrieve"]
-    K --> T["Think"]
-    T --> A["Act"]
-    A --> O
+timeline
+    title Where NeuralFlow goes next
+    Now : Voice ops on a simulated 3×3 cluster
+        : Moss in-process knowledge (96 docs)
+        : Live scenarios and telemetry memory
+    Next : Log incidents into Moss by voice, so memory grows
+         : Proactive spoken alerts before the forecast crosses 80 °C
+         : Sensor and fan lag in the model
+    Later : Real telemetry via NVIDIA DCGM / IPMI
+          : Rack-level workload placement
+          : Multi-operator incident rooms on LiveKit
 ```
 
 ---
 
-# 🌍 AI FOR A COOLER PLANET
+## 🏷️ Deploy (Render)
 
-AI infrastructure is becoming increasingly compute-intensive.
-
-That makes thermal efficiency more than a monitoring problem.
-
-NeuralFlow explores how predictive intelligence can help infrastructure operators:
-
-- prevent avoidable thermal throttling
-- preserve thermal headroom
-- reduce unnecessary cooling effort
-- understand recurring failure patterns
-- make infrastructure decisions with better context
-
-The objective is simple:
-
-> **Use intelligence before the heat becomes the problem.**
-
----
-
-## Deploy to Render
-
-This `v7` (`Y:/v7neuralflow/thecool-main`, branch `v7`) is deploy-ready. `v5` (`Y:/v5`) stays untouched.
-
-**Render settings:** Root Directory `thecool-main` (or repo root with `render.yaml`), Build `npm ci && npm run build`, Start `npm start`, Health `/health`, Node 20.
-
-**Env vars (Dashboard → Environment):** `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY` (rotate anytime), `MOSS_INDEX_NAME=neuralflow-kb`, `MOSS_EMBEDDINGS=local`, `LIVEKIT_*`, `LLM_API_KEY/BASE_URL/MODEL=gemini-3.6-flash`. If quota hits `429 credit_exhausted` app shows `Local fallback` honestly.
+`render.yaml` deploys branch `v8` with root directory `thecool-main`: build `npm ci && npm run build`, start `npm start`, health check `/health`. Set the environment variables above in the Render dashboard, then check:
 
 ```bash
 curl https://your-app.onrender.com/api/health
 curl https://your-app.onrender.com/api/moss/stats
 ```
 
-If `npm ci` fails with `EUSAGE` (no `package-lock.json`), ensure Render **Root Directory = thecool-main** (where `package-lock.json` lives) — do not use repo root.
-
 ---
 
-## NEURALFLOW
+<div align="center">
 
-### Predict the heat. Protect the compute. Operate with context.
+**NeuralFlow** · built by [Yash Jaiswal](https://github.com/its-yashjai)
+
+*Use intelligence before the heat becomes the problem.*
+
+</div>
