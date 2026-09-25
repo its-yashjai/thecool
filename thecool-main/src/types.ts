@@ -20,7 +20,18 @@ export interface ForecastInfo {
   unc: number;
 }
 
+/** A workload pattern playing on the live engine (started from Analytics → Live Simulation or by voice). */
+export interface LiveScenario {
+  pattern: string;
+  duration: number;
+  t: number;
+  speed: number;
+  done: boolean;
+  history: HistoryData;
+}
+
 export interface LiveSimulationState {
+  scenario?: LiveScenario | null;
   tick: number;
   pid_T: number;
   nf_T: number;

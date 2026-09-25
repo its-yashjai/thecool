@@ -124,6 +124,13 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
 
   return (
     <div id="control-room-view" className="space-y-6">
+      {liveState?.scenario && !liveState.scenario.done && (
+        <div className="px-4 py-2.5 rounded-xl bg-[#2ed573]/10 border border-[#2ed573]/30 text-xs text-[#2ed573] font-mono flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-[#2ed573] animate-pulse" />
+          Scenario "{liveState.scenario.pattern}" is driving GPU power: t = {liveState.scenario.t}s / {liveState.scenario.duration}s at {liveState.scenario.speed}x.
+          Workload sliders take effect after it ends (or say "stop scenario").
+        </div>
+      )}
       {/* Control Room Voice Intercom & Direct Microphone Control */}
       <div className="p-4 rounded-2xl bg-gradient-to-r from-[#0c0c2a] via-[#101035] to-[#0c0c2a] border border-sky-500/30 shadow-xl flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
         <div className="flex items-center gap-3.5">

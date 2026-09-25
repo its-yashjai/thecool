@@ -221,6 +221,23 @@ async function startServer() {
     }
   });
 
+  // Play a workload pattern on the LIVE cluster (Analytics → Live Simulation, or voice).
+  app.post("/api/scenario", (req, res) => {
+    engine.startScenario(String(req.body?.pattern || "mixed"), Number(req.body?.duration) || 300, Number(req.body?.speed) || 5);
+    const snap = engine.fullSnapshot();
+    telemetryHistory.push(snap);
+    broadcast(snap);
+    res.json(snap);
+  });
+
+  app.post("/api/scenario/stop", (_req, res) => {
+    engine.stopScenario();
+    const snap = engine.fullSnapshot();
+    telemetryHistory.push(snap);
+    broadcast(snap);
+    res.json(snap);
+  });
+
   app.get("/api/snapshot", (_req, res) => {
     res.json(engine.fullSnapshot());
   });
@@ -308,7 +325,10 @@ async function startServer() {
   // 0.6s Tick interval broadcast loop
   setInterval(() => {
     if (engine.running) {
-      const state = engine.step();
+      // A scenario can run faster than real time: several simulated seconds per tick.
+      const n = engine.stepsPerTick();
+      let state = engine.step();
+      for (let i = 1; i < n && engine.running; i++) state = engine.step();
       telemetryHistory.push(state);
       broadcast(state);
     }

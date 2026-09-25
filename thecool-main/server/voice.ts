@@ -251,6 +251,15 @@ export class VoiceDispatcher {
       base.historySampleCount = 0;
     }
 
+    // Rule-based answer for live-history questions (used when no LLM is configured or the LLM fails)
+    if (intended.liveHistory && historySummary && (base.intent === 'general' || base.intent === 'knowledge' || base.intent === 'diagnose')) {
+      base.intent = 'knowledge';
+      base.spokenReply = historySampleCount > 0
+        ? `From live telemetry: ${historySummary.replace(/ \| /g, '. ')}.`
+        : historySummary;
+      base.actionTaken = `Answered from live telemetry history (${historySampleCount} samples)`;
+    }
+
     // Logging for debug — shows intended vs actual backend
     console.log(`[voice] query="${transcript.slice(0,120)}" intent=${base.intent} sources=liveState:${intended.liveState} liveHistory:${intended.liveHistory} mossIntended:${intended.moss} mossActual:${actualMoss} historySamples:${historySampleCount} mossBackend:${mossResult.backend} docs:${mossResult.results.map(r=>r.document.id).join(',')}`);
 
@@ -444,6 +453,21 @@ export class VoiceDispatcher {
       const topDoc = mossResult.results[0].document;
       spokenReply = `${this.speakDoc(topDoc)} Retrieved via ${this.backendLabel(mossResult)} in ${mossResult.latencyMs} milliseconds.`;
       actionTaken = `Answered from knowledge base: ${topDoc.id} via ${this.backendLabel(mossResult)} (${mossResult.latencyMs}ms)`;
+    }
+    // 1C. SCENARIO on the live cluster: "run training burst scenario", "stop scenario"
+    else if (!isQuestionForm && has('scenario') && has('stop', 'end', 'cancel', 'abort')) {
+      intent = 'pause_sim';
+      engine.stopScenario();
+      spokenReply = `Scenario stopped. The cluster is paused at ${engine.nf_T.toFixed(1)}°C so you can inspect it.`;
+      actionTaken = 'Stopped live scenario and paused the cluster';
+    }
+    else if (!isQuestionForm && has('scenario')) {
+      const pattern = has('training', 'burst') ? 'training_burst' : has('inference') ? 'inference' : has('idle') ? 'idle' : 'mixed';
+      const label = pattern.replace('_', ' ');
+      intent = 'start_sim';
+      engine.startScenario(pattern, 300, 5);
+      spokenReply = `Running a 5-minute ${label} scenario on the live cluster at 5x speed. Watch NeuralFlow and PID respond, then ask me what happened.`;
+      actionTaken = `Started live ${label} scenario (300s at 5x) on the NeuralFlow engine`;
     }
     // 2. START / RUN / PLAY / BEGIN SIMULATION
     else if (

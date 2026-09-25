@@ -51,73 +51,42 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
   const [mode, setMode] = useState<'precomputed' | 'live_sim' | 'live_feed'>('precomputed');
   const [pattern, setPattern] = useState<'mixed' | 'training_burst' | 'inference' | 'idle'>('mixed');
   const [duration, setDuration] = useState<number>(600);
+  const [speed, setSpeed] = useState<number>(5);
   const [simulating, setSimulating] = useState(false);
-  const [customSimResult, setCustomSimResult] = useState<SimulationResult | null>(null);
   const [simError, setSimError] = useState<string | null>(null);
-  const simReqRef = useRef(0);
-  // Playback position (seconds shown) while a Live Simulation run plays; null = show the whole run.
-  const [playhead, setPlayhead] = useState<number | null>(null);
-  const playTimerRef = useRef<any>(null);
-
-  const stopPlayback = () => {
-    if (playTimerRef.current) clearInterval(playTimerRef.current);
-    playTimerRef.current = null;
-    setPlayhead(null);
-  };
-  const startPlayback = (n: number) => {
-    if (playTimerRef.current) clearInterval(playTimerRef.current);
-    let i = 1;
-    setPlayhead(1);
-    const step = Math.max(1, Math.ceil(n / 160)); // ~8 seconds for any duration
-    playTimerRef.current = setInterval(() => {
-      i = Math.min(n, i + step);
-      setPlayhead(i);
-      if (i >= n) stopPlayback();
-    }, 50);
-  };
-  useEffect(() => () => { if (playTimerRef.current) clearInterval(playTimerRef.current); }, []);
   const [activeTab, setActiveTab] = useState<'temp' | 'fan' | 'heatmap' | 'analysis' | 'stack3d'>('temp');
 
-  const runCustomSimulation = async () => {
-    const reqId = ++simReqRef.current;
+  // Live Simulation drives the REAL NeuralFlow engine: the chosen pattern plays on the live cluster, so
+  // Control Room, voice, warnings, heatmap, 3D stack and live history all see the same run.
+  const scenario = liveState?.scenario ?? null;
+  const scenarioActive = !!scenario && !scenario.done;
+
+  const postScenario = async (url: string, body?: object) => {
     setSimulating(true);
     setSimError(null);
     try {
-      const res = await fetch('/api/simulate', {
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pattern, duration })
+        body: JSON.stringify(body ?? {})
       });
       if (!res.ok) throw new Error(`Server returned ${res.status}`);
-      const data: SimulationResult = await res.json();
-      // Ignore stale responses if the user changed pattern/duration while a run was in flight
-      if (reqId === simReqRef.current) {
-        setCustomSimResult(data);
-        startPlayback(data.history.time.length);
-      }
     } catch (e: any) {
-      console.error('Failed to run simulation', e);
-      if (reqId === simReqRef.current) setSimError(e?.message ?? 'Simulation failed');
+      console.error('Scenario request failed', e);
+      setSimError(e?.message ?? 'Request failed');
     } finally {
-      if (reqId === simReqRef.current) setSimulating(false);
+      setSimulating(false);
     }
   };
-
-  // Live Simulation re-runs as soon as the mode is opened or Pattern / Duration change.
-  // (Before, the dropdowns did nothing until "Run Simulation" was clicked, and the view kept
-  // showing the pre-computed benchmark.)
-  useEffect(() => {
-    if (mode === 'live_sim') runCustomSimulation();
-    else stopPlayback();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, pattern, duration]);
+  const runCustomSimulation = () => postScenario('/api/scenario', { pattern, duration, speed });
+  const stopScenario = () => postScenario('/api/scenario/stop');
 
   // Select appropriate active dataset
   let currentResult: SimulationResult | null = null;
   if (mode === 'live_sim') {
-    currentResult = customSimResult
-      ? (playhead !== null ? summarizeRun(customSimResult, playhead) : customSimResult)
-      : benchmarkData;
+    currentResult = scenario && scenario.history.time.length > 0
+      ? summarizeRun({ pattern: scenario.pattern, duration: scenario.duration, history: scenario.history } as any, scenario.history.time.length)
+      : null;
   } else if (mode === 'live_feed' && liveState && liveState.history.time.length > 0) {
     const pidTemps = liveState.history.pid_temp;
     const nfTemps = liveState.history.nf_temp;
@@ -184,6 +153,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
   };
 
   const latestTemp = history.nf_temp[history.nf_temp.length - 1] ?? nf.peak_temp;
+  const showEmptyLiveSim = mode === 'live_sim' && !currentResult;
   const latestFan = history.nf_fan[history.nf_fan.length - 1] ?? 45.0;
   const latestPower = history.power[history.power.length - 1] ?? 240.0;
 
@@ -272,37 +242,56 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
               </select>
             </div>
 
-            <button
-              id="run-sim-button"
-              onClick={runCustomSimulation}
-              disabled={simulating}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-[#2ed573] hover:bg-[#26bd64] text-[#050510] transition-all disabled:opacity-50 cursor-pointer"
-            >
-              {simulating ? (
-                <>
-                  <RotateCcw className="w-3.5 h-3.5 animate-spin" /> Simulating...
-                </>
-              ) : (
-                <>
-                  <Play className="w-3.5 h-3.5 fill-current" /> Run Simulation
-                </>
-              )}
-            </button>
-            {simError && <span className="text-xs text-red-400">Run failed: {simError}</span>}
-            {!simError && customSimResult && playhead !== null && (
+            <div className="flex items-center gap-1.5 text-xs text-zinc-300">
+              <span>Speed:</span>
+              <select
+                id="select-speed"
+                value={speed}
+                onChange={e => setSpeed(Number(e.target.value))}
+                className="bg-[#141432] border border-white/10 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-[#2ed573]"
+              >
+                <option value={1}>1x (real time)</option>
+                <option value={5}>5x</option>
+                <option value={10}>10x</option>
+              </select>
+            </div>
+
+            {scenarioActive ? (
+              <button
+                id="stop-sim-button"
+                onClick={stopScenario}
+                disabled={simulating}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-red-500 hover:bg-red-400 text-white transition-all disabled:opacity-50 cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" /> Stop
+              </button>
+            ) : (
+              <button
+                id="run-sim-button"
+                onClick={runCustomSimulation}
+                disabled={simulating}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-[#2ed573] hover:bg-[#26bd64] text-[#050510] transition-all disabled:opacity-50 cursor-pointer"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" /> Run on Live Cluster
+              </button>
+            )}
+            {simError && <span className="text-xs text-red-400">Failed: {simError}</span>}
+            {!simError && scenarioActive && scenario && (
               <div className="flex items-center gap-2 text-[11px] font-mono text-[#2ed573]">
-                <span className="w-2 h-2 rounded-full bg-[#2ed573] animate-pulse" />
-                <span>LIVE t = {playhead}s / {customSimResult.duration}s</span>
+                <span className={`w-2 h-2 rounded-full bg-[#2ed573] ${liveState?.running ? 'animate-pulse' : ''}`} />
+                <span>{liveState?.running ? 'LIVE' : 'PAUSED'} · {scenario.pattern} · t = {scenario.t}s / {scenario.duration}s · {scenario.speed}x</span>
                 <div className="w-28 h-1.5 rounded-full bg-white/10 overflow-hidden">
-                  <div className="h-full bg-[#2ed573]" style={{ width: `${(playhead / customSimResult.duration) * 100}%` }} />
+                  <div className="h-full bg-[#2ed573]" style={{ width: `${(scenario.t / scenario.duration) * 100}%` }} />
                 </div>
-                <button onClick={stopPlayback} className="text-zinc-400 hover:text-white underline cursor-pointer">skip</button>
               </div>
             )}
-            {!simError && customSimResult && !simulating && playhead === null && (
-              <span className="text-[11px] font-mono text-zinc-500">
-                ✓ {customSimResult.pattern} · {customSimResult.duration}s · {customSimResult.history.time.length} samples
+            {!simError && scenario && scenario.done && (
+              <span className="text-[11px] font-mono text-zinc-400">
+                ✓ {scenario.pattern} · {scenario.t}s run on live cluster · ask voice "what happened over the last five minutes?"
               </span>
+            )}
+            {!simError && !scenario && (
+              <span className="text-[11px] font-mono text-zinc-500">Resets the live cluster and plays this pattern on the NeuralFlow engine</span>
             )}
           </div>
         )}
@@ -316,6 +305,14 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
           </button>
         )}
       </div>
+
+      {showEmptyLiveSim && (
+        <div className="p-6 rounded-2xl bg-[#0e0e26] border border-dashed border-[#2ed573]/30 text-sm text-zinc-300">
+          <strong className="text-[#2ed573]">No live run yet.</strong> Pick a pattern and press <strong>Run on Live Cluster</strong>, or say
+          "run training burst scenario". The cluster resets, plays the pattern on the real NeuralFlow engine, and the
+          Control Room, 3D stack, heatmap and voice agent all follow along.
+        </div>
+      )}
 
       {/* Hero Metric Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

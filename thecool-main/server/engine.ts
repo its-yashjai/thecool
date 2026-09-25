@@ -1,7 +1,10 @@
 import { GPUThermalSimulator } from './simulator.js';
 import { PIDController } from './pid.js';
 import { NeuralFlowController } from './neuralflow.js';
-import { LiveSimulationState, SimulationResult, HistoryData } from '../src/types.js';
+import { LiveSimulationState, SimulationResult, HistoryData, LiveScenario } from '../src/types.js';
+
+const emptyHistory = (): HistoryData => ({ time: [], pid_temp: [], nf_temp: [], pid_fan: [], nf_fan: [], power: [] });
+export const SCENARIO_PATTERNS = ['mixed', 'training_burst', 'inference', 'idle'];
 
 export class SimulationEngine {
   HISTORY_LEN = 120;
@@ -24,6 +27,35 @@ export class SimulationEngine {
 
   /** Manual fan command from voice/UI, held for a number of ticks (otherwise the controller overwrote it next tick). */
   fan_override: { value: number; untilTick: number } | null = null;
+
+  /** Scenario playing on the LIVE engine: power follows the pattern instead of the workload sliders. */
+  scenario: (LiveScenario & { phaseLen: number }) | null = null;
+
+  /** Reset the cluster and play `pattern` for `duration` simulated seconds, `speed` seconds per tick. */
+  startScenario(pattern: string, duration: number, speed: number): void {
+    this.reset();
+    const p = SCENARIO_PATTERNS.includes(pattern) ? pattern : 'mixed';
+    const d = Math.round(Math.min(1200, Math.max(60, duration || 300)));
+    const s = Math.round(Math.min(20, Math.max(1, speed || 1)));
+    this.scenario = { pattern: p, duration: d, t: 0, speed: s, done: false, phaseLen: Math.max(20, Math.floor(d / 3)), history: emptyHistory() };
+    this.running = true;
+  }
+
+  stopScenario(): void {
+    if (this.scenario && !this.scenario.done) this.scenario.done = true;
+    this.running = false;
+  }
+
+  /** Simulated seconds to advance per 0.6s wall tick. */
+  stepsPerTick(): number {
+    return this.scenario && !this.scenario.done ? this.scenario.speed : 1;
+  }
+
+  private scenarioInfo(): LiveScenario | null {
+    const s = this.scenario;
+    if (!s) return null;
+    return { pattern: s.pattern, duration: s.duration, t: s.t, speed: s.speed, done: s.done, history: s.history };
+  }
 
   gpu_offsets: number[][];
   history: HistoryData;
@@ -61,6 +93,7 @@ export class SimulationEngine {
     this.rolling_pw = [80.0];
     this.running = false;
     this.fan_override = null;
+    this.scenario = null;
     this.pid_ctrl.reset();
     this.nf_ctrl.reset();
 
@@ -83,12 +116,10 @@ export class SimulationEngine {
   }
 
   step(): LiveSimulationState {
-    const power = this.sim.powerFromWorkload(
-      this.ai_reqs,
-      this.api_reqs,
-      this.users,
-      this.batch
-    );
+    const sc = this.scenario && !this.scenario.done ? this.scenario : null;
+    const power = sc
+      ? this.sim.powerProfile(sc.t, sc.pattern, sc.phaseLen)
+      : this.sim.powerFromWorkload(this.ai_reqs, this.api_reqs, this.users, this.batch);
 
     this.rolling_pw.push(power);
     if (this.rolling_pw.length > 10) {
@@ -134,6 +165,21 @@ export class SimulationEngine {
 
     this.tick += 1;
 
+    if (sc) {
+      const sh = sc.history;
+      sh.time.push(sc.t);
+      sh.pid_temp.push(Number(this.pid_T.toFixed(2)));
+      sh.nf_temp.push(Number(this.nf_T.toFixed(2)));
+      sh.pid_fan.push(Number(this.pid_fan.toFixed(2)));
+      sh.nf_fan.push(Number(this.nf_fan.toFixed(2)));
+      sh.power.push(Number(power.toFixed(2)));
+      sc.t += 1;
+      if (sc.t >= sc.duration) {
+        sc.done = true;
+        this.running = false; // hold the final state so it can be inspected / asked about
+      }
+    }
+
     // PINN forecast
     let forecast = null;
     if (this.nf_ctrl.window.length >= 25) {
@@ -169,7 +215,8 @@ export class SimulationEngine {
       ai_reqs: this.ai_reqs,
       api_reqs: this.api_reqs,
       users: this.users,
-      batch: this.batch
+      batch: this.batch,
+      scenario: this.scenarioInfo()
     };
   }
 
@@ -208,7 +255,8 @@ export class SimulationEngine {
       ai_reqs: this.ai_reqs,
       api_reqs: this.api_reqs,
       users: this.users,
-      batch: this.batch
+      batch: this.batch,
+      scenario: this.scenarioInfo()
     };
   }
 
