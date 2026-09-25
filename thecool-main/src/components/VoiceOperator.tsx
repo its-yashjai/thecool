@@ -550,11 +550,11 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
               {messages.map((m) => (
                 <div
                   key={m.id}
-                  className={`flex flex-col ${m.sender === 'operator' ? 'items-end' : 'items-start'}`}
+                  className={`flex flex-col ${m.sender !== 'agent' ? 'items-end' : 'items-start'}`}
                 >
                   <div className="flex items-center gap-2 mb-1 px-1">
                     <span className="text-[10px] font-mono font-semibold text-zinc-400">
-                      {m.sender === 'operator' ? 'Operator (You)' : 'NeuralFlow Voice Agent'}
+                      {m.sender !== 'agent' ? 'Operator (You)' : 'NeuralFlow Voice Agent'}
                     </span>
                     <span className="text-[9px] font-mono text-zinc-500">{m.timestamp}</span>
                     {m.mossLatency !== undefined && (
@@ -576,7 +576,7 @@ export const VoiceOperator: React.FC<VoiceOperatorProps> = ({
 
                   <div
                     className={`max-w-[88%] rounded-2xl p-3.5 leading-relaxed ${
-                      m.sender === 'operator'
+                      m.sender !== 'agent'
                         ? 'bg-gradient-to-r from-[#1e90ff] to-[#0984e3] text-white rounded-tr-none shadow-md'
                         : 'bg-[#12122d] border border-white/10 text-zinc-200 rounded-tl-none shadow-md'
                     }`}

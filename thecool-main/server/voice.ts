@@ -269,8 +269,15 @@ export class VoiceDispatcher {
     if (intended.liveHistory && historySummary && (base.intent === 'general' || base.intent === 'knowledge' || base.intent === 'diagnose')) {
       base.intent = 'knowledge';
       const s = telemetryHistory?.getSummary(intended.windowMs) ?? null;
-      base.spokenReply = s && historySampleCount > 1 ? this.speakHistory(s) : historySummary;
-      base.actionTaken = `Answered from live telemetry history (${historySampleCount} samples)`;
+      const recap = s && historySampleCount > 1
+        ? this.speakHistory(s)
+        : 'There is no live history yet because the cluster has not been running. Say "run training burst scenario" to generate some.';
+      // Combined questions ("...have we seen this before, what should we do?") keep the retrieved runbook too
+      const top = intended.moss && mossResult.results.length > 0 && !(mossResult.backend === 'local' && mossResult.results[0].score < 2)
+        ? mossResult.results[0].document
+        : null;
+      base.spokenReply = top ? `${recap} From the knowledge base via ${this.backendLabel(mossResult)}: ${this.speakDoc(top)}` : recap;
+      base.actionTaken = `Answered from live telemetry history (${historySampleCount} samples)${top ? ` + ${top.id} via ${this.backendLabel(mossResult)}` : ''}`;
     }
 
     // Logging for debug — shows intended vs actual backend
