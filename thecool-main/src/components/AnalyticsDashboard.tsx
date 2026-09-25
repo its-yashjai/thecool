@@ -18,6 +18,25 @@ import { TemperatureChart, FanPowerChart } from './Charts';
 import { GpuClusterHeatmap } from './GpuClusterHeatmap';
 import { GpuStack3D } from './GpuStack3D';
 
+/** Metrics for the first `n` seconds of a run, so Live Simulation can play back step by step. */
+function summarizeRun(r: SimulationResult, n: number): SimulationResult {
+  const h = r.history;
+  const cut = (a: number[]) => a.slice(0, n);
+  const hist = { time: cut(h.time), pid_temp: cut(h.pid_temp), nf_temp: cut(h.nf_temp), pid_fan: cut(h.pid_fan), nf_fan: cut(h.nf_fan), power: cut(h.power) };
+  const stats = (t: number[], f: number[]) => {
+    const mean = t.reduce((a, b) => a + b, 0) / t.length;
+    const sd = Math.sqrt(t.reduce((a, b) => a + (b - mean) ** 2, 0) / t.length);
+    const energy = f.reduce((a, b) => a + (b * 3.0) / 3600.0, 0);
+    return {
+      m: { peak_temp: +Math.max(...t).toFixed(1), mean_temp: +mean.toFixed(1), temp_std: +sd.toFixed(1), cooling_energy_wh: +energy.toFixed(1), throttle_events: t.filter(x => x > 85).length, min_temp: +Math.min(...t).toFixed(1) },
+      energy
+    };
+  };
+  const p = stats(hist.pid_temp, hist.pid_fan);
+  const q = stats(hist.nf_temp, hist.nf_fan);
+  return { ...r, pid: p.m, neuralflow: q.m, energy_saved_pct: +((1 - q.energy / Math.max(p.energy, 0.001)) * 100).toFixed(1), duration: n, history: hist };
+}
+
 interface AnalyticsDashboardProps {
   benchmarkData: SimulationResult | null;
   liveState: LiveSimulationState | null;
@@ -36,6 +55,27 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
   const [customSimResult, setCustomSimResult] = useState<SimulationResult | null>(null);
   const [simError, setSimError] = useState<string | null>(null);
   const simReqRef = useRef(0);
+  // Playback position (seconds shown) while a Live Simulation run plays; null = show the whole run.
+  const [playhead, setPlayhead] = useState<number | null>(null);
+  const playTimerRef = useRef<any>(null);
+
+  const stopPlayback = () => {
+    if (playTimerRef.current) clearInterval(playTimerRef.current);
+    playTimerRef.current = null;
+    setPlayhead(null);
+  };
+  const startPlayback = (n: number) => {
+    if (playTimerRef.current) clearInterval(playTimerRef.current);
+    let i = 1;
+    setPlayhead(1);
+    const step = Math.max(1, Math.ceil(n / 160)); // ~8 seconds for any duration
+    playTimerRef.current = setInterval(() => {
+      i = Math.min(n, i + step);
+      setPlayhead(i);
+      if (i >= n) stopPlayback();
+    }, 50);
+  };
+  useEffect(() => () => { if (playTimerRef.current) clearInterval(playTimerRef.current); }, []);
   const [activeTab, setActiveTab] = useState<'temp' | 'fan' | 'heatmap' | 'analysis' | 'stack3d'>('temp');
 
   const runCustomSimulation = async () => {
@@ -51,7 +91,10 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
       if (!res.ok) throw new Error(`Server returned ${res.status}`);
       const data: SimulationResult = await res.json();
       // Ignore stale responses if the user changed pattern/duration while a run was in flight
-      if (reqId === simReqRef.current) setCustomSimResult(data);
+      if (reqId === simReqRef.current) {
+        setCustomSimResult(data);
+        startPlayback(data.history.time.length);
+      }
     } catch (e: any) {
       console.error('Failed to run simulation', e);
       if (reqId === simReqRef.current) setSimError(e?.message ?? 'Simulation failed');
@@ -65,13 +108,16 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
   // showing the pre-computed benchmark.)
   useEffect(() => {
     if (mode === 'live_sim') runCustomSimulation();
+    else stopPlayback();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, pattern, duration]);
 
   // Select appropriate active dataset
   let currentResult: SimulationResult | null = null;
   if (mode === 'live_sim') {
-    currentResult = customSimResult ?? benchmarkData;
+    currentResult = customSimResult
+      ? (playhead !== null ? summarizeRun(customSimResult, playhead) : customSimResult)
+      : benchmarkData;
   } else if (mode === 'live_feed' && liveState && liveState.history.time.length > 0) {
     const pidTemps = liveState.history.pid_temp;
     const nfTemps = liveState.history.nf_temp;
@@ -243,9 +289,19 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
               )}
             </button>
             {simError && <span className="text-xs text-red-400">Run failed: {simError}</span>}
-            {!simError && customSimResult && !simulating && (
+            {!simError && customSimResult && playhead !== null && (
+              <div className="flex items-center gap-2 text-[11px] font-mono text-[#2ed573]">
+                <span className="w-2 h-2 rounded-full bg-[#2ed573] animate-pulse" />
+                <span>LIVE t = {playhead}s / {customSimResult.duration}s</span>
+                <div className="w-28 h-1.5 rounded-full bg-white/10 overflow-hidden">
+                  <div className="h-full bg-[#2ed573]" style={{ width: `${(playhead / customSimResult.duration) * 100}%` }} />
+                </div>
+                <button onClick={stopPlayback} className="text-zinc-400 hover:text-white underline cursor-pointer">skip</button>
+              </div>
+            )}
+            {!simError && customSimResult && !simulating && playhead === null && (
               <span className="text-[11px] font-mono text-zinc-500">
-                {customSimResult.pattern} · {customSimResult.duration}s · {customSimResult.history.time.length} samples
+                ✓ {customSimResult.pattern} · {customSimResult.duration}s · {customSimResult.history.time.length} samples
               </span>
             )}
           </div>
@@ -266,15 +322,15 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
         {/* Metric 1: Energy Saved */}
         <div id="metric-card-energy" className="p-5 rounded-2xl bg-gradient-to-br from-[#121230] to-[#0a0a20] border border-white/5 shadow-xl relative overflow-hidden">
           <div className="flex items-center justify-between text-zinc-400 mb-2">
-            <span className="text-[11px] font-mono tracking-wider uppercase font-semibold">Cooling Energy Saved</span>
+            <span className="text-[11px] font-mono tracking-wider uppercase font-semibold">{energySaved >= 0 ? 'Cooling Energy Saved' : 'Extra Cooling Energy'}</span>
             <div className="p-1.5 rounded-lg bg-[#2ed573]/10 text-[#2ed573]">
               <Zap className="w-4 h-4" />
             </div>
           </div>
-          <div className="text-3xl font-extrabold text-[#2ed573] tracking-tight font-mono">
-            {energySaved.toFixed(1)}%
+          <div className={`text-3xl font-extrabold tracking-tight font-mono ${energySaved >= 0 ? 'text-[#2ed573]' : 'text-amber-400'}`}>
+            {energySaved >= 0 ? '' : '+'}{Math.abs(energySaved).toFixed(1)}%
           </div>
-          <div className="mt-2 text-xs flex items-center gap-1 text-emerald-400">
+          <div className={`mt-2 text-xs flex items-center gap-1 ${energySaved >= 0 ? 'text-emerald-400' : 'text-amber-300'}`}>
             <TrendingDown className="w-3.5 h-3.5" />
             <span>{nf.cooling_energy_wh.toFixed(1)} Wh vs {pid.cooling_energy_wh.toFixed(1)} Wh (PID)</span>
           </div>
@@ -324,7 +380,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
             ±{nf.temp_std.toFixed(1)}°C
           </div>
           <div className="mt-2 text-xs text-zinc-400">
-            vs ±{pid.temp_std.toFixed(1)}°C on PID (62% tighter)
+            vs ±{pid.temp_std.toFixed(1)}°C on PID ({pid.temp_std > 0 ? (nf.temp_std <= pid.temp_std ? `${Math.round((1 - nf.temp_std / pid.temp_std) * 100)}% tighter` : `${Math.round((nf.temp_std / pid.temp_std - 1) * 100)}% wider`) : 'n/a'})
           </div>
         </div>
       </div>
@@ -403,7 +459,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
         <div className="space-y-4">
           <FanPowerChart history={history} height={360} />
           <div className="p-4 rounded-xl bg-[#0e0e26] border border-white/5 text-xs text-zinc-300">
-            <strong>Proactive vs Reactive Dynamics:</strong> Notice how PID waits until temperatures breach 75°C to violently spin fans to 100%, causing acoustic and power spikes. NeuralFlow gently pre-ramps fans to 55-70% prior to spikes, avoiding peak fan saturation and saving <strong>{energySaved.toFixed(1)}%</strong> energy.
+            <strong>Proactive vs Reactive Dynamics:</strong> Notice how PID waits until temperatures breach 75°C to violently spin fans to 100%, causing acoustic and power spikes. NeuralFlow gently pre-ramps fans to 55-70% prior to spikes, avoiding peak fan saturation. In this run NeuralFlow {energySaved >= 0 ? 'saved' : 'used an extra'} <strong>{Math.abs(energySaved).toFixed(1)}%</strong> cooling energy compared with PID.
           </div>
         </div>
       )}
