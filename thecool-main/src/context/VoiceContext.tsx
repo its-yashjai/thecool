@@ -69,6 +69,13 @@ interface VoiceContextType {
 
 const VoiceContext = createContext<VoiceContextType | null>(null);
 
+/** Same spoken command? Ignores case/punctuation ("Increase workload." == "increase workload") and prefixes. */
+const normCmd = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+const isSameCommand = (a: string, b: string) => {
+  const x = normCmd(a), y = normCmd(b);
+  return Boolean(x && y && (x === y || x.startsWith(y) || y.startsWith(x)));
+};
+
 const STORAGE_KEY = 'neuralflow_voice_history_v5';
 const DIRECTIVE_KEY = 'neuralflow_last_voice_directive';
 const LANG_STORAGE_KEY = 'neuralflow_voice_lang_v1';
@@ -172,6 +179,10 @@ export const VoiceProvider: React.FC<{
   const vadInitializedRef = useRef(false);
   const vadSpeechStartedRef = useRef(false);
   const vadTurnEndTimerRef = useRef<number | null>(null);
+  /** Latest interim transcript (a ref, so callbacks created once never see a stale value). */
+  const latestInterimRef = useRef<string>('');
+  /** Set when the browser refuses the mic; stops the endless restart loop until the user clicks. */
+  const micBlockedRef = useRef<boolean>(false);
 
   const [messages, setMessages] = useState<VoiceMessage[]>(() => {
     try {
@@ -364,19 +375,14 @@ export const VoiceProvider: React.FC<{
 
         // Accumulate interim so we don't lose mid-sentence context
         if (interimPart) {
-          setInterimTranscript(prev => {
-            const merged = (prev + ' ' + interimPart).trim().replace(/\s+/g, ' ');
-            return merged.length > 500 ? merged.slice(-500) : merged;
-          });
+          latestInterimRef.current = interimPart;
+          setInterimTranscript(interimPart.length > 500 ? interimPart.slice(-500) : interimPart);
         }
 
-        const isDuplicateRecent = (cand: string) => {
-          const now = Date.now();
-          if (now - lastDispatchTimeRef.current > 3000) return false;
-          const c = cand.toLowerCase().trim();
-          const last = lastDispatchedTextRef.current.toLowerCase().trim();
-          return Boolean(last && c === last);
-        };
+        // The final result often arrives after we already dispatched the interim text (with different
+        // punctuation), which used to run the same command twice.
+        const isDuplicateRecent = (cand: string) =>
+          Date.now() - lastDispatchTimeRef.current < 4000 && isSameCommand(cand, lastDispatchedTextRef.current);
 
         // Gate: ignore dispatches when mic is essentially silent (noise floor) or AI just spoke
         const isMicActive = (() => {
@@ -407,6 +413,7 @@ export const VoiceProvider: React.FC<{
               return;
             }
             if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+            latestInterimRef.current = '';
             setInterimTranscript('');
             setTranscript(finalPart);
             dispatchVoiceRef.current(finalPart);
@@ -428,6 +435,7 @@ export const VoiceProvider: React.FC<{
                 // Re-check mic activity at dispatch time
                 const stillActive = Date.now() - lastVoiceAtRef.current < 3000;
                 if (!stillActive && bestConfidence < 0.5) return;
+                latestInterimRef.current = '';
                 setInterimTranscript('');
                 setTranscript(interimPart);
                 dispatchVoiceRef.current(interimPart);
@@ -439,6 +447,7 @@ export const VoiceProvider: React.FC<{
 
       recognition.onerror = (event: any) => {
         if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          micBlockedRef.current = true;
           isRecognitionRunningRef.current = false;
           setIsListening(false);
           setMicStatus('blocked');
@@ -462,9 +471,9 @@ export const VoiceProvider: React.FC<{
           silenceTimerRef.current = null;
         }
         // In continuous duplex mode, if unmuted and not speaking, re-launch recognition cleanly
-        if (isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current) {
+        if (isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current && !micBlockedRef.current) {
           setTimeout(() => {
-            if (isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current && !isRecognitionRunningRef.current) {
+            if (isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current && !isRecognitionRunningRef.current && !micBlockedRef.current) {
               try {
                 startRecognition();
               } catch {}
@@ -485,134 +494,158 @@ export const VoiceProvider: React.FC<{
     }
   }, []);
 
-  // Speech Synthesis Helper with zero-latency voice caching & Chrome keep-alive
+  // ── Speech synthesis ────────────────────────────────────────────────────────
+  // Fixes: (1) isSpeaking is set BEFORE speech starts, so the recognition watchdog can no longer
+  // restart the mic in the gap and make NeuralFlow hear its own voice; (2) replies are split into
+  // sentence chunks (Chrome stops long utterances after ~15s); (3) a safety timer resumes listening
+  // if the browser never fires onend; (4) a speech id ignores stale events from cancelled replies.
+  const speechIdRef = useRef(0);
+  const speechSafetyTimerRef = useRef<any>(null);
+  const speechUtterancesRef = useRef<SpeechSynthesisUtterance[]>([]);
+
+  const resumeListeningAfterSpeech = useCallback((delayMs: number) => {
+    setTimeout(() => {
+      if (isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current && !micBlockedRef.current) {
+        if (vadRef.current) vadRef.current.reset();
+        vadSpeechStartedRef.current = false;
+        if (!isRecognitionRunningRef.current) startRecognition();
+      }
+    }, delayMs);
+  }, [startRecognition]);
+
   const speakText = useCallback((text: string) => {
+    const id = ++speechIdRef.current;
+    if (speechSafetyTimerRef.current) {
+      clearTimeout(speechSafetyTimerRef.current);
+      speechSafetyTimerRef.current = null;
+    }
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      setTimeout(() => {
-        if (isLiveKitConnectedRef.current && !isMutedRef.current) {
-          startRecognition();
-        }
-      }, 800);
+      resumeListeningAfterSpeech(300);
       return;
     }
 
+    // Mark speaking immediately (not on utterance.onstart) so nothing restarts the mic mid-reply
+    isSpeakingRef.current = true;
+    setIsSpeaking(true);
+
+    // Stop recognition while speaking to prevent the mic picking up the reply
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.onstart = null;
+        recognitionRef.current.onresult = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.onend = null;
+        recognitionRef.current.abort();
+      } catch {}
+      recognitionRef.current = null;
+    }
+    isRecognitionRunningRef.current = false;
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    latestInterimRef.current = '';
+    setInterimTranscript('');
+    if (vadRef.current) vadRef.current.reset();
+    vadSpeechStartedRef.current = false;
+
+    const synth = window.speechSynthesis;
+    const finish = () => {
+      if (id !== speechIdRef.current) return; // a newer reply (or stopSpeaking) took over
+      if (speechSafetyTimerRef.current) {
+        clearTimeout(speechSafetyTimerRef.current);
+        speechSafetyTimerRef.current = null;
+      }
+      speechUtterancesRef.current = [];
+      (window as any).__currentVoiceUtterance = null;
+      isSpeakingRef.current = false;
+      setIsSpeaking(false);
+      aiSpeechEndedAtRef.current = Date.now();
+      resumeListeningAfterSpeech(600); // acoustic settle time so the tail of the reply isn't heard
+    };
+
     try {
-      // 1. Temporarily stop recognition while speaking to prevent microphone feedback
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.onstart = null;
-          recognitionRef.current.onresult = null;
-          recognitionRef.current.onerror = null;
-          recognitionRef.current.onend = null;
-          recognitionRef.current.abort();
-        } catch {}
-        recognitionRef.current = null;
-      }
-      isRecognitionRunningRef.current = false;
-
-      // 2. Reset VAD so it doesn't pick up AI's own voice
-      if (vadRef.current) {
-        vadRef.current.reset();
-      }
-      vadSpeechStartedRef.current = false;
-
-      // 3. Prepare speech synthesis
-      window.speechSynthesis.cancel();
-      if (window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
+      synth.cancel();
+      const clean = text.replace(/[*_#`]/g, '').replace(/\s+/g, ' ').trim();
+      if (!clean) {
+        finish();
+        return;
       }
 
-      const cleanText = text.replace(/[*_#`]/g, '');
-      const utterance = new SpeechSynthesisUtterance(cleanText);
-      utterance.rate = 1.05;
-      utterance.pitch = 1.0;
-      utterance.volume = 1.0;
+      // Sentence chunks of up to ~180 chars (split only on ". " so numbers like 40.5 stay intact)
+      const chunks: string[] = [];
+      for (const sentence of clean.split(/(?<=[.!?])\s+/)) {
+        const t = sentence.trim();
+        if (!t) continue;
+        const last = chunks[chunks.length - 1];
+        if (last && last.length + t.length < 180) chunks[chunks.length - 1] = last + ' ' + t;
+        else chunks.push(t);
+      }
 
-      const voices = voicesRef.current.length > 0 ? voicesRef.current : window.speechSynthesis.getVoices();
-      const preferredVoice = voices.find(v => 
+      const voices = voicesRef.current.length > 0 ? voicesRef.current : synth.getVoices();
+      const preferredVoice = voices.find(v =>
         (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Daniel') || v.name.includes('Alex') || v.name.includes('Victoria') || v.name.includes('Karen')) &&
         v.lang.startsWith('en')
       ) || voices.find(v => v.lang.startsWith('en')) || voices[0];
 
-      if (preferredVoice) utterance.voice = preferredVoice;
+      const utterances = chunks.map((chunk, i) => {
+        const u = new SpeechSynthesisUtterance(chunk);
+        u.rate = 1.05;
+        u.pitch = 1.0;
+        u.volume = 1.0;
+        if (preferredVoice) u.voice = preferredVoice;
+        u.onerror = (e: any) => {
+          if (e?.error === 'interrupted' || e?.error === 'canceled') return; // caused by our own cancel()
+          console.warn('SpeechSynthesis error:', e?.error ?? e);
+          finish();
+        };
+        if (i === chunks.length - 1) u.onend = finish;
+        return u;
+      });
+      // Keep references: Chrome can garbage-collect a speaking utterance and then never fire onend
+      speechUtterancesRef.current = utterances;
+      (window as any).__currentVoiceUtterance = utterances;
 
-      (window as any).__currentVoiceUtterance = utterance;
-
-      const handleSpeechDone = () => {
-        setIsSpeaking(false);
-        isSpeakingRef.current = false;
-        (window as any).__currentVoiceUtterance = null;
-        aiSpeechEndedAtRef.current = Date.now();
-
-        // 600ms acoustic settle time after speech ends before restarting recognition
-        // Longer delay prevents the agent's own voice from being picked up and also
-        // gives the user time to start their response
-        setTimeout(() => {
-          if (isLiveKitConnectedRef.current && !isMutedRef.current && !isSpeakingRef.current) {
-            // Reset VAD again after AI finishes to clear any residual
-            if (vadRef.current) {
-              vadRef.current.reset();
-            }
-            vadSpeechStartedRef.current = false;
-            startRecognition();
-          }
-        }, 600);
-      };
-
-      utterance.onstart = () => {
-        setIsSpeaking(true);
-        isSpeakingRef.current = true;
-      };
-      utterance.onend = handleSpeechDone;
-      utterance.onerror = (e) => {
-        console.warn('SpeechSynthesis error:', e);
-        handleSpeechDone();
-      };
-
-      window.speechSynthesis.speak(utterance);
-
-      // Keep-alive loop for Chrome's 15-second speech synthesis pause bug
-      const resumeInterval = setInterval(() => {
-        if (!isSpeakingRef.current) {
-          clearInterval(resumeInterval);
-        } else if (window.speechSynthesis.paused) {
-          window.speechSynthesis.resume();
+      // Safety net: resume listening even if the browser never reports the end of speech
+      const estimateMs = clean.split(' ').length * 450 + 4000;
+      speechSafetyTimerRef.current = setTimeout(() => {
+        if (id === speechIdRef.current && isSpeakingRef.current) {
+          console.warn('Speech end not reported by browser; resuming listening');
+          try { synth.cancel(); } catch {}
+          finish();
         }
-      }, 500);
+      }, estimateMs);
 
+      // Chrome silently drops speak() called in the same tick as cancel()
+      setTimeout(() => {
+        if (id !== speechIdRef.current) return;
+        if (synth.paused) synth.resume();
+        utterances.forEach(u => synth.speak(u));
+      }, 60);
     } catch (e) {
       console.warn('Speech synthesis failed', e);
-      setIsSpeaking(false);
-      isSpeakingRef.current = false;
-      setTimeout(() => {
-        if (isLiveKitConnectedRef.current && !isMutedRef.current) {
-          startRecognition();
-        }
-      }, 300);
+      finish();
     }
-  }, [startRecognition]);
+  }, [resumeListeningAfterSpeech]);
 
   const stopSpeaking = useCallback(() => {
+    speechIdRef.current++;
+    if (speechSafetyTimerRef.current) {
+      clearTimeout(speechSafetyTimerRef.current);
+      speechSafetyTimerRef.current = null;
+    }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
       } catch {}
     }
+    speechUtterancesRef.current = [];
     setIsSpeaking(false);
     isSpeakingRef.current = false;
     (window as any).__currentVoiceUtterance = null;
     aiSpeechEndedAtRef.current = Date.now();
-    // Reset VAD when manually stopping speech
-    if (vadRef.current) {
-      vadRef.current.reset();
-    }
-    vadSpeechStartedRef.current = false;
-    setTimeout(() => {
-      if (isLiveKitConnectedRef.current && !isMutedRef.current) {
-        startRecognition();
-      }
-    }, 300);
-  }, [startRecognition]);
+    resumeListeningAfterSpeech(300);
+  }, [resumeListeningAfterSpeech]);
 
   // Web Audio Stream setup — optimized for noise cancellation & accurate metering
   const startAudioMetering = useCallback(async () => {
@@ -751,17 +784,13 @@ export const VoiceProvider: React.FC<{
                 }
                 // Use turn detection from VAD
                 if (result.isTurnEnd && !isSpeakingRef.current && !isDispatchingRef.current) {
-                  const currentInterim = interimTranscript.trim();
+                  const currentInterim = latestInterimRef.current.trim();
                   if (currentInterim.length >= 4) {
-                    const isDuplicateRecent = (cand: string) => {
-                      const now = Date.now();
-                      if (now - lastDispatchTimeRef.current > 3000) return false;
-                      const c = cand.toLowerCase().trim();
-                      const last = lastDispatchedTextRef.current.toLowerCase().trim();
-                      return Boolean(last && c === last);
-                    };
+                    const isDuplicateRecent = (cand: string) =>
+                      Date.now() - lastDispatchTimeRef.current < 4000 && isSameCommand(cand, lastDispatchedTextRef.current);
                     if (!isDuplicateRecent(currentInterim)) {
                       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+                      latestInterimRef.current = '';
                       setInterimTranscript('');
                       setTranscript(currentInterim);
                       dispatchVoiceRef.current(currentInterim);
@@ -784,10 +813,6 @@ export const VoiceProvider: React.FC<{
             );
             
             // Create a resampled stream for VAD (16kHz)
-            const vadContext = new (window.AudioContext || (window as any).webkitAudioContext)({
-              sampleRate: 16000
-            });
-            const vadSource = vadContext.createMediaStreamSource(audioStreamRef.current);
             await vad.start(audioStreamRef.current);
             vadRef.current = vad;
             vadInitializedRef.current = true;
@@ -1027,8 +1052,9 @@ export const VoiceProvider: React.FC<{
   useEffect(() => () => leaveLiveKitRoom(), [leaveLiveKitRoom]);
 
   // Connect to LiveKit Room (Activates continuous microphone and real-time audio)
-  const connectLiveKit = useCallback(async (isUserInitiated = false) => {
+  const connectLiveKit = useCallback(async (isUserInitiated: any = false) => {
     setMicErrorMessage(null);
+    micBlockedRef.current = false;
     try {
       // 1. Start audio hardware metering if available
       await startAudioMetering();
@@ -1127,6 +1153,7 @@ export const VoiceProvider: React.FC<{
       setIsListening(false);
       setMicStatus('idle');
     } else {
+      micBlockedRef.current = false;
       startRecognition();
       setIsListening(true);
       setMicStatus('listening');
@@ -1389,6 +1416,7 @@ export const VoiceProvider: React.FC<{
         !isMutedRef.current &&
         !isSpeakingRef.current &&
         !isRecognitionRunningRef.current &&
+        !micBlockedRef.current &&
         typeof window !== 'undefined'
       ) {
         try {
