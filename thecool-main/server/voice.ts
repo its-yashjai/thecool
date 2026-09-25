@@ -202,7 +202,7 @@ export class VoiceDispatcher {
       return { liveState: true, liveHistory: false, moss: false, windowMs: 5 * 60 * 1000 };
     }
     // Any other question: retrieve (cheap), otherwise it fell through to action rules with no documents.
-    if (q.includes('?') || /^(what|why|when|how|which|who|where|explain|define|describe|tell me|according to)\b/.test(q)) {
+    if (q.includes('?') || /^(what|whats|why|when|how|which|who|where|explain|define|describe|tell me|according to|was|were|is|are|does|do|did|has|have|should|could|would|will)\b/.test(q)) {
       return { liveState: true, liveHistory: false, moss: true, windowMs: 5 * 60 * 1000 };
     }
     return { liveState: false, liveHistory: false, moss: false, windowMs: 5 * 60 * 1000 };
@@ -405,7 +405,8 @@ export class VoiceDispatcher {
     // "traffic gets heavy" inside a question must NOT actuate simulator.
     const lowerRaw = raw.toLowerCase();
     const isQuestionMark = raw.includes('?');
-    const startsWithQuestionWord = /^(what|why|when|how|which|explain|define|describe|tell me|according to)\b/.test(text);
+    // Spoken questions arrive without '?', so auxiliary-verb openers count too ("was there a time...", "have we seen...")
+    const startsWithQuestionWord = /^(what|whats|why|when|how|which|who|where|explain|define|describe|tell me|according to|was|were|is|are|does|do|did|has|have|should|could|would|will|can)\b/.test(text);
     const containsQuestionPhrase = /\b(what should i do when|according to|tell me (about|what)|explain|describe)\b/.test(text);
     const isWhenShouldPattern = /\bwhen\b.*\b(should|does|do|can|will|would|prepare|trigger)\b/.test(text);
     const isInterrogative = isQuestionMark || startsWithQuestionWord || containsQuestionPhrase || isWhenShouldPattern;
