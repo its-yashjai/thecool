@@ -495,9 +495,10 @@ export class VoiceDispatcher {
       const pattern = has('training', 'burst') ? 'training_burst' : has('inference') ? 'inference' : has('idle') ? 'idle' : 'mixed';
       const label = pattern.replace('_', ' ');
       intent = 'start_sim';
-      engine.startScenario(pattern, 300, 5);
-      spokenReply = `Running a 5-minute ${label} scenario on the live cluster at 5x speed. Watch NeuralFlow and PID respond, then ask me what happened.`;
-      actionTaken = `Started live ${label} scenario (300s at 5x) on the NeuralFlow engine`;
+      // 600 simulated seconds at 5x = about 2 minutes on stage
+      engine.startScenario(pattern, 600, 5);
+      spokenReply = `Running a 10-minute ${label} scenario on the live cluster at 5x speed, about two minutes real time. Watch NeuralFlow and PID respond, then ask me what happened.`;
+      actionTaken = `Started live ${label} scenario (600s at 5x) on the NeuralFlow engine`;
     }
     // 2. START / RUN / PLAY / BEGIN SIMULATION
     else if (

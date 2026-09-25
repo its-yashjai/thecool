@@ -29,7 +29,7 @@ export class SimulationEngine {
   fan_override: { value: number; untilTick: number } | null = null;
 
   /** Scenario playing on the LIVE engine: power follows the pattern instead of the workload sliders. */
-  scenario: (LiveScenario & { phaseLen: number }) | null = null;
+  scenario: (LiveScenario & { phaseLen: number; acc: number }) | null = null;
 
   /** Reset the cluster and play `pattern` for `duration` simulated seconds, `speed` seconds per tick. */
   startScenario(pattern: string, duration: number, speed: number): void {
@@ -37,7 +37,7 @@ export class SimulationEngine {
     const p = SCENARIO_PATTERNS.includes(pattern) ? pattern : 'mixed';
     const d = Math.round(Math.min(1200, Math.max(60, duration || 300)));
     const s = Math.round(Math.min(20, Math.max(1, speed || 1)));
-    this.scenario = { pattern: p, duration: d, t: 0, speed: s, done: false, phaseLen: Math.max(20, Math.floor(d / 3)), history: emptyHistory() };
+    this.scenario = { pattern: p, duration: d, t: 0, speed: s, done: false, phaseLen: Math.max(20, Math.floor(d / 3)), history: emptyHistory(), acc: 0 };
     this.running = true;
   }
 
@@ -46,9 +46,17 @@ export class SimulationEngine {
     this.running = false;
   }
 
-  /** Simulated seconds to advance per 0.6s wall tick. */
-  stepsPerTick(): number {
-    return this.scenario && !this.scenario.done ? this.scenario.speed : 1;
+  /**
+   * Simulated seconds to advance on this 0.6s wall tick. A scenario's `speed` is a multiple of real
+   * time (1x = one simulated second per wall second), so it accumulates speed × 0.6 per tick.
+   */
+  stepsPerTick(tickSeconds = 0.6): number {
+    const s = this.scenario;
+    if (!s || s.done) return 1;
+    s.acc += s.speed * tickSeconds;
+    const n = Math.floor(s.acc);
+    s.acc -= n;
+    return n;
   }
 
   private scenarioInfo(): LiveScenario | null {

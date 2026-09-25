@@ -326,7 +326,8 @@ async function startServer() {
   setInterval(() => {
     if (engine.running) {
       // A scenario can run faster than real time: several simulated seconds per tick.
-      const n = engine.stepsPerTick();
+      const n = engine.stepsPerTick(0.6);
+      if (n === 0) return; // slow scenario speeds skip some ticks
       let state = engine.step();
       for (let i = 1; i < n && engine.running; i++) state = engine.step();
       telemetryHistory.push(state);
