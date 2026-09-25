@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Zap,
   Thermometer,
@@ -34,29 +34,44 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
   const [duration, setDuration] = useState<number>(600);
   const [simulating, setSimulating] = useState(false);
   const [customSimResult, setCustomSimResult] = useState<SimulationResult | null>(null);
+  const [simError, setSimError] = useState<string | null>(null);
+  const simReqRef = useRef(0);
   const [activeTab, setActiveTab] = useState<'temp' | 'fan' | 'heatmap' | 'analysis' | 'stack3d'>('temp');
 
   const runCustomSimulation = async () => {
+    const reqId = ++simReqRef.current;
     setSimulating(true);
+    setSimError(null);
     try {
       const res = await fetch('/api/simulate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pattern, duration })
       });
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
       const data: SimulationResult = await res.json();
-      setCustomSimResult(data);
-    } catch (e) {
+      // Ignore stale responses if the user changed pattern/duration while a run was in flight
+      if (reqId === simReqRef.current) setCustomSimResult(data);
+    } catch (e: any) {
       console.error('Failed to run simulation', e);
+      if (reqId === simReqRef.current) setSimError(e?.message ?? 'Simulation failed');
     } finally {
-      setSimulating(false);
+      if (reqId === simReqRef.current) setSimulating(false);
     }
   };
+
+  // Live Simulation re-runs as soon as the mode is opened or Pattern / Duration change.
+  // (Before, the dropdowns did nothing until "Run Simulation" was clicked, and the view kept
+  // showing the pre-computed benchmark.)
+  useEffect(() => {
+    if (mode === 'live_sim') runCustomSimulation();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, pattern, duration]);
 
   // Select appropriate active dataset
   let currentResult: SimulationResult | null = null;
   if (mode === 'live_sim') {
-    currentResult = customSimResult || benchmarkData;
+    currentResult = customSimResult ?? benchmarkData;
   } else if (mode === 'live_feed' && liveState && liveState.history.time.length > 0) {
     const pidTemps = liveState.history.pid_temp;
     const nfTemps = liveState.history.nf_temp;
@@ -227,6 +242,12 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                 </>
               )}
             </button>
+            {simError && <span className="text-xs text-red-400">Run failed: {simError}</span>}
+            {!simError && customSimResult && !simulating && (
+              <span className="text-[11px] font-mono text-zinc-500">
+                {customSimResult.pattern} · {customSimResult.duration}s · {customSimResult.history.time.length} samples
+              </span>
+            )}
           </div>
         )}
 

@@ -19,7 +19,8 @@ export class GPUThermalSimulator {
     return num * stdDev + mean;
   }
 
-  powerProfile(t: number, pattern: string): number {
+  /** `phaseLen`: seconds per phase of the 'mixed' pattern (idle → inference → training burst). */
+  powerProfile(t: number, pattern: string, phaseLen = 100): number {
     if (pattern === 'idle') {
       return 90 + 10 * Math.sin(t * 0.1) + this.gaussianRandom(0, 2);
     } else if (pattern === 'inference') {
@@ -33,10 +34,11 @@ export class GPUThermalSimulator {
         return 650 + 50 * Math.sin(t * 0.2) + this.gaussianRandom(0, 10);
       }
     } else if (pattern === 'mixed') {
-      const cycle = Math.floor(t / 100) % 3;
+      const cycle = Math.floor(t / phaseLen) % 3;
+      const tPhase = t - Math.floor(t / phaseLen) * phaseLen; // training burst ramps from the start of its phase
       if (cycle === 0) return this.powerProfile(t, 'idle');
       if (cycle === 1) return this.powerProfile(t, 'inference');
-      return this.powerProfile(t, 'training_burst');
+      return this.powerProfile(tPhase, 'training_burst');
     } else {
       return 100;
     }

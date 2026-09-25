@@ -240,8 +240,11 @@ export class SimulationEngine {
     let pid_energy_sum = 0;
     let nf_energy_sum = 0;
 
+    // Mixed pattern: split any duration into three equal phases so 2, 5 and 10 minute runs all show
+    // idle -> inference -> training burst (with fixed 100s phases a 2-minute run was almost all idle).
+    const phaseLen = Math.max(20, Math.floor(duration / 3));
     for (let t = 0; t < duration; t++) {
-      const P = sim.powerProfile(t, pattern);
+      const P = sim.powerProfile(t, pattern, phaseLen);
 
       pid_powers_window.push(P);
       if (pid_powers_window.length > 10) pid_powers_window.shift();
