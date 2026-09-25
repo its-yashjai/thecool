@@ -2,7 +2,18 @@ import { MossSearchResponse, MossDocument } from './moss.js';
 import { livekitRoomName } from './livekit.js';
 import { askLlm, askLlmMulti, llmStatus, LiveState, LiveHistoryContext } from './llm.js';
 import { SimulationEngine } from './engine.js';
-import { TelemetryHistory } from './telemetryHistory.js';
+import { TelemetryHistory, HistorySummary } from './telemetryHistory.js';
+
+const NUM_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+const MIN_RE = /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(min|mins|minute|minutes)\b/;
+/** Loose phrasing for "what happened recently" — speech-to-text rarely gives the exact textbook sentence. */
+const HISTORY_PATTERNS: RegExp[] = [
+  /\bwhat\s+(has\s+|have\s+)?(happen|happened|happens|happening)\b/,
+  /\b(last|past|previous|recent|earlier|ago|before|back)\b.*\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(min|mins|minute|minutes)\b/,
+  /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(min|mins|minute|minutes)\s*(ago|before|back|earlier)\b/,
+  /\b(history|recap|so far|recently|trend|timeline)\b/,
+  /\bhow (did|has) (the )?(temperature|temp|fan|fans|power|workload|cluster|gpu)\b/,
+];
 
 export interface VoiceAgentResponse {
   id: string;
@@ -57,6 +68,7 @@ export class VoiceDispatcher {
 
   private isHistoryQuestion(transcript: string): boolean {
     const q = transcript.toLowerCase();
+    if (HISTORY_PATTERNS.some(re => re.test(q))) return true;
     return (
       /\blast\s+(5|five|10|ten)\s+minutes?\b/.test(q) ||
       /\bover the last\b/.test(q) ||
@@ -86,9 +98,11 @@ export class VoiceDispatcher {
 
   private parseHistoryWindowMs(transcript: string): number {
     const q = transcript.toLowerCase();
-    if (/\blast\s+(10|ten)\s+minutes?\b/.test(q)) return 10 * 60 * 1000;
-    if (/\blast\s+(5|five)\s+minutes?\b/.test(q)) return 5 * 60 * 1000;
-    // default 5m
+    const m = q.match(MIN_RE);
+    if (m) {
+      const n = NUM_WORDS[m[1]] ?? Number(m[1]);
+      if (Number.isFinite(n) && n > 0) return Math.min(10, Math.max(1, n)) * 60 * 1000; // buffer holds 10 min
+    }
     return 5 * 60 * 1000;
   }
 
@@ -254,9 +268,8 @@ export class VoiceDispatcher {
     // Rule-based answer for live-history questions (used when no LLM is configured or the LLM fails)
     if (intended.liveHistory && historySummary && (base.intent === 'general' || base.intent === 'knowledge' || base.intent === 'diagnose')) {
       base.intent = 'knowledge';
-      base.spokenReply = historySampleCount > 0
-        ? `From live telemetry: ${historySummary.replace(/ \| /g, '. ')}.`
-        : historySummary;
+      const s = telemetryHistory?.getSummary(intended.windowMs) ?? null;
+      base.spokenReply = s && historySampleCount > 1 ? this.speakHistory(s) : historySummary;
       base.actionTaken = `Answered from live telemetry history (${historySampleCount} samples)`;
     }
 
@@ -323,6 +336,22 @@ export class VoiceDispatcher {
       }
     }
     return base;
+  }
+
+  /** Natural spoken recap of recent telemetry. */
+  private speakHistory(s: HistorySummary): string {
+    const o = s.oldest!, c = s.current!, d = s.delta!;
+    const span = s.durationSec >= 90 ? `${(s.durationSec / 60).toFixed(1)} minutes` : `${Math.round(s.durationSec)} seconds`;
+    const dir = d.nf_T > 0.5 ? 'rose' : d.nf_T < -0.5 ? 'fell' : 'held steady';
+    const temps = dir === 'held steady' ? `around ${c.nf_T.toFixed(1)}°C` : `from ${o.nf_T.toFixed(1)} to ${c.nf_T.toFixed(1)}°C`;
+    const parts = [
+      `Over the last ${span} of live telemetry, GPU temperature ${dir} ${temps} while power went from ${o.power.toFixed(0)} to ${c.power.toFixed(0)} watts.`,
+      `NeuralFlow moved the fans from ${o.nf_fan.toFixed(0)} to ${c.nf_fan.toFixed(0)} percent.`,
+      `Peak was ${s.peak!.nf_T.toFixed(1)}°C versus ${s.peak!.pid_T.toFixed(1)}°C for reactive PID, ${s.throttleEvents > 0 ? `with ${s.throttleEvents} throttle samples` : 'with no throttling'}.`,
+    ];
+    if (c.forecastWorst != null) parts.push(`The 60-second forecast worst case is ${c.forecastWorst.toFixed(1)}°C.`);
+    parts.push(c.running ? 'The cluster is still running.' : 'The simulation is paused now.');
+    return parts.join(' ');
   }
 
   /** Short spoken form of a knowledge document. */
