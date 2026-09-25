@@ -22,6 +22,9 @@ export class SimulationEngine {
   users = 20;
   batch = 0;
 
+  /** Manual fan command from voice/UI, held for a number of ticks (otherwise the controller overwrote it next tick). */
+  fan_override: { value: number; untilTick: number } | null = null;
+
   gpu_offsets: number[][];
   history: HistoryData;
 
@@ -57,6 +60,7 @@ export class SimulationEngine {
     this.tick = 0;
     this.rolling_pw = [80.0];
     this.running = false;
+    this.fan_override = null;
     this.pid_ctrl.reset();
     this.nf_ctrl.reset();
 
@@ -68,6 +72,14 @@ export class SimulationEngine {
       nf_fan: [],
       power: []
     };
+  }
+
+  /** Hold the NeuralFlow fan at `pct` for `holdTicks` ticks (default 40 ticks = 24s at 0.6s/tick). */
+  setFanOverride(pct: number, holdTicks = 40): number {
+    const value = Math.max(20, Math.min(100, Number.isFinite(pct) ? pct : 30));
+    this.fan_override = { value, untilTick: this.tick + holdTicks };
+    this.nf_fan = value;
+    return value;
   }
 
   step(): LiveSimulationState {
@@ -90,7 +102,16 @@ export class SimulationEngine {
 
     // 2. NeuralFlow step (proactive PINN)
     const nf_state = [this.nf_T, power, this.nf_fan, this.sim.T_ambient, rp];
-    this.nf_fan = this.nf_ctrl.step(nf_state);
+    let nfFan = this.nf_ctrl.step(nf_state);
+    if (this.fan_override) {
+      if (this.tick < this.fan_override.untilTick) {
+        // Safety guardrail: when hot, a manual override may raise cooling but never lower it below the controller.
+        nfFan = this.nf_T >= 80 ? Math.max(nfFan, this.fan_override.value) : this.fan_override.value;
+      } else {
+        this.fan_override = null;
+      }
+    }
+    this.nf_fan = nfFan;
     this.nf_T = this.sim.stepDirect(this.nf_T, power, this.nf_fan, 1.0);
 
     // 3. Update history

@@ -47,10 +47,30 @@ async function startServer() {
     console.log(`LLM       : ${l.configured ? `${l.model} via ${l.host} (open questions only)` : 'off - ' + l.reason}`);
     console.log('───────────────────────────────────');
   };
-  retriever.init().then(printBanner);
+  retriever.init().then(printBanner).catch((e) => console.error("[retrieval] init crashed:", e?.message ?? e));
 
   // Voice dispatcher (deterministic intents, answers knowledge questions from retrieved docs; no LLM)
   const voiceDispatcher = new VoiceDispatcher();
+
+  // Numeric input guard: NaN/Infinity from a bad request would poison the simulator permanently.
+  const num = (v: unknown, min: number, max: number, int = false): number | undefined => {
+    if (v === undefined || v === null || v === '') return undefined;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return undefined;
+    const c = Math.min(max, Math.max(min, n));
+    return int ? Math.round(c) : c;
+  };
+  const applyParams = (p: any) => {
+    const ai = num(p?.ai_reqs, 0, 100);
+    const api = num(p?.api_reqs, 0, 500);
+    const users = num(p?.users, 0, 200);
+    const batch = num(p?.batch, 0, 5, true);
+    if (ai !== undefined) engine.ai_reqs = ai;
+    if (api !== undefined) engine.api_reqs = api;
+    if (users !== undefined) engine.users = users;
+    if (batch !== undefined) engine.batch = batch;
+  };
+  const PATTERNS = new Set(['idle', 'inference', 'training_burst', 'mixed']);
 
   // Precomputed baseline evaluation result
   let cachedBenchmark = SimulationEngine.runBatch("mixed", 600);
@@ -76,9 +96,14 @@ async function startServer() {
 
   // ── Retrieval (Moss) Endpoints ──────────────────────────────────
   app.post("/api/moss/search", async (req, res) => {
-    const query = String(req.body.query || "");
-    const limit = Math.min(10, Math.max(1, Number(req.body.limit) || 4));
-    res.json(await retriever.search(query, limit));
+    try {
+      const query = String(req.body?.query || "");
+      const limit = Math.min(10, Math.max(1, Number(req.body?.limit) || 4));
+      res.json(await retriever.search(query, limit));
+    } catch (err: any) {
+      console.error("search error:", err?.message ?? err);
+      res.status(500).json({ error: "search failed" });
+    }
   });
 
   app.get("/api/moss/documents", (_req, res) => {
@@ -109,7 +134,7 @@ async function startServer() {
   });
 
   app.post("/api/moss/mode", (req, res) => {
-    const mode = String(req.body.mode || "").trim().toLowerCase();
+    const mode = String(req.body?.mode || "").trim().toLowerCase();
     if (mode !== 'moss' && mode !== 'local' && mode !== 'auto') {
       return res.status(400).json({ error: "mode must be 'moss', 'local' or 'auto'" });
     }
@@ -121,9 +146,10 @@ async function startServer() {
 
   // ── LiveKit & Voice Operator Endpoints ──────────────────────────
   app.post("/api/voice/dispatch", async (req, res) => {
+   try {
     const t0 = process.hrtime.bigint();
-    const transcript = String(req.body.transcript || "");
-    const participant = String(req.body.participant || "operator");
+    const transcript = String(req.body?.transcript || "").slice(0, 2000);
+    const participant = String(req.body?.participant || "operator");
     // Only call Moss/local retrieval when the query actually needs it
     const preview = voiceDispatcher.previewSources(transcript);
     let mossResult: any;
@@ -154,6 +180,11 @@ async function startServer() {
     telemetryHistory.push(snap);
     broadcast(snap);
     res.json(response);
+   } catch (err: any) {
+    // Without this an exception left the request hanging and crashed Node (unhandled rejection).
+    console.error("voice dispatch error:", err?.message ?? err);
+    if (!res.headersSent) res.status(500).json({ error: "voice dispatch failed" });
+   }
   });
 
   // Real LiveKit access token (JWT). Returns { configured: false } until the three env vars are set.
@@ -168,7 +199,7 @@ async function startServer() {
 
   // General-purpose agent: uses Moss retrieval only for NeuralFlow/datacenter/runbook questions
   app.post("/api/agent/turn", async (req, res) => {
-    const transcript = String(req.body.transcript || "").trim();
+    const transcript = String(req.body?.transcript || "").trim().slice(0, 4000);
     if (!transcript) return res.status(400).json({ error: "transcript required" });
     const q = transcript.toLowerCase();
     const needsMoss = /neuralflow|datacenter|runbook|\brb-|\bh100\b|\bb200\b|\bgpu\b|throttl|thermal|cooling|forecast|pue|cluster|hardware|guardrail|workload|fan\b|power\b/i.test(q);
@@ -199,14 +230,14 @@ async function startServer() {
   });
 
   app.post("/api/simulate", (req, res) => {
-    const pattern = req.body.pattern || "mixed";
-    const duration = Math.min(1200, Math.max(60, Number(req.body.duration) || 600));
+    const pattern = PATTERNS.has(String(req.body?.pattern)) ? String(req.body.pattern) : "mixed";
+    const duration = Math.round(Math.min(1200, Math.max(60, Number(req.body?.duration) || 600)));
     const result = SimulationEngine.runBatch(pattern, duration);
     res.json(result);
   });
 
   app.post("/api/control", (req, res) => {
-    const { cmd, ai_reqs, api_reqs, users, batch } = req.body;
+    const cmd = req.body?.cmd;
     if (cmd === "play") {
       engine.running = true;
     } else if (cmd === "pause") {
@@ -214,10 +245,7 @@ async function startServer() {
     } else if (cmd === "reset") {
       engine.reset();
     } else if (cmd === "params") {
-      if (ai_reqs !== undefined) engine.ai_reqs = Number(ai_reqs);
-      if (api_reqs !== undefined) engine.api_reqs = Number(api_reqs);
-      if (users !== undefined) engine.users = Number(users);
-      if (batch !== undefined) engine.batch = Number(batch);
+      applyParams(req.body);
     }
     const snap = engine.fullSnapshot();
     telemetryHistory.push(snap);
@@ -235,7 +263,8 @@ async function startServer() {
         wsServer.emit("connection", ws, request);
       });
     } else {
-      // Allow other upgrades (e.g. vite if needed, though HMR is disabled)
+      // Unknown upgrade path: close it instead of leaving the socket hanging open.
+      socket.destroy();
     }
   });
 
@@ -251,6 +280,8 @@ async function startServer() {
   wsServer.on("connection", (ws: WebSocket) => {
     // Send immediate state snapshot
     ws.send(JSON.stringify(engine.fullSnapshot()));
+    // An unhandled 'error' event on a socket would crash the whole server.
+    ws.on("error", (e) => console.warn("WS client error:", (e as any)?.message ?? e));
 
     ws.on("message", (message: string) => {
       try {
@@ -263,10 +294,7 @@ async function startServer() {
         } else if (cmd === "reset") {
           engine.reset();
         } else if (cmd === "params") {
-          if (msg.ai_reqs !== undefined) engine.ai_reqs = Number(msg.ai_reqs);
-          if (msg.api_reqs !== undefined) engine.api_reqs = Number(msg.api_reqs);
-          if (msg.users !== undefined) engine.users = Number(msg.users);
-          if (msg.batch !== undefined) engine.batch = Number(msg.batch);
+          applyParams(msg);
         }
         const snap = engine.fullSnapshot();
         telemetryHistory.push(snap);
@@ -302,7 +330,7 @@ async function startServer() {
   }
 
   const shutdown = async () => {
-    await retriever.close();
+    try { await retriever.close(); } catch { /* ignore */ }
     process.exit(0);
   };
   process.on("SIGINT", shutdown);
@@ -323,4 +351,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error("NeuralFlow failed to start:", err);
+  process.exit(1);
+});

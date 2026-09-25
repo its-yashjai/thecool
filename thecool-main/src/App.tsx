@@ -39,6 +39,7 @@ export function App() {
     }
   });
   const wsRef = useRef<WebSocket | null>(null);
+  const connectedRef = useRef<boolean>(false);
 
   const handleVoiceDirective = (directive: { text: string; action: string; time: string; intent?: string }) => {
     setLastVoiceDirective(directive);
@@ -71,6 +72,7 @@ export function App() {
         wsRef.current = ws;
 
         ws.onopen = () => {
+          connectedRef.current = true;
           if (isMounted) setConnected(true);
         };
 
@@ -84,6 +86,7 @@ export function App() {
         };
 
         ws.onclose = () => {
+          connectedRef.current = false;
           if (isMounted) {
             setConnected(false);
             reconnectTimeout = setTimeout(connectWs, 2000);
@@ -105,7 +108,7 @@ export function App() {
 
     // Fallback polling every 1.5s if WS is disconnected
     const pollInterval = setInterval(() => {
-      if (!connected) {
+      if (!connectedRef.current) {
         fetch('/api/snapshot')
           .then(res => res.json())
           .then(data => {
@@ -121,7 +124,7 @@ export function App() {
       clearInterval(pollInterval);
       if (wsRef.current) wsRef.current.close();
     };
-  }, [connected]);
+  }, []);
 
   const handleSendControl = (cmd: string, params?: Partial<WorkloadParams>) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {

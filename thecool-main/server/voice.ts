@@ -187,6 +187,10 @@ export class VoiceDispatcher {
     if (/\b(current|right now|status|how hot|temperature)\b/.test(q) && q.includes('?')) {
       return { liveState: true, liveHistory: false, moss: false, windowMs: 5 * 60 * 1000 };
     }
+    // Any other question: retrieve (cheap), otherwise it fell through to action rules with no documents.
+    if (q.includes('?') || /^(what|why|when|how|which|who|where|explain|define|describe|tell me|according to)\b/.test(q)) {
+      return { liveState: true, liveHistory: false, moss: true, windowMs: 5 * 60 * 1000 };
+    }
     return { liveState: false, liveHistory: false, moss: false, windowMs: 5 * 60 * 1000 };
   }
 
@@ -345,8 +349,18 @@ export class VoiceDispatcher {
     const currentFan = snap.nf_fan ?? 30;
     const predictedTemp = snap.forecast?.worst ?? snap.forecast?.mean ?? (currentJunction + 2.5);
 
-    const has = (...words: string[]) => words.some(w => text.includes(w) || text === w || raw.toLowerCase().includes(w));
-    const hasAny = (words: string[]) => words.some(w => text.includes(w) || raw.toLowerCase().includes(w));
+    // Whole-word keyword matching. Plain substring matching caused misfires such as "restart" -> start,
+    // "threshold" -> hold (pause), "good"/"algorithm" -> go (start), "display" -> play, "this"/"high" -> hi.
+    // Keywords of 5+ letters also match as a word prefix (start -> started, cluster -> clusters).
+    const rawNorm = raw.toLowerCase().replace(/[^a-z0-9%\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const wordMatch = (hay: string, w: string): boolean => {
+      if (/[^a-z0-9 ]/.test(w)) return hay.includes(w) || raw.toLowerCase().includes(w);
+      const tail = w.length >= 5 ? '' : '(?![a-z0-9])';
+      return new RegExp(`(?<![a-z0-9])${escapeRe(w)}${tail}`).test(hay);
+    };
+    const has = (...words: string[]) => words.some(w => wordMatch(text, w) || wordMatch(rawNorm, w));
+    const hasAny = (words: string[]) => has(...words);
 
     // ── Knowledge vs Command routing (honest) ──────────────────────────
     // Interrogative/question phrasing must take precedence over workload keywords.
@@ -357,6 +371,10 @@ export class VoiceDispatcher {
     const containsQuestionPhrase = /\b(what should i do when|according to|tell me (about|what)|explain|describe)\b/.test(text);
     const isWhenShouldPattern = /\bwhen\b.*\b(should|does|do|can|will|would|prepare|trigger)\b/.test(text);
     const isInterrogative = isQuestionMark || startsWithQuestionWord || containsQuestionPhrase || isWhenShouldPattern;
+    // Questions ("why did it go up", "what happens if I stop") must never start/stop/reset the simulator.
+    const isQuestionForm = startsWithQuestionWord || containsQuestionPhrase;
+    const isStopListening = has('stop listening', 'mute mic', 'mute microphone', 'disable microphone', 'go to sleep');
+    const isConcise = has('talk less', 'listen more', 'be brief', 'concise', 'short response', 'brief mode', 'less talk');
 
     const isExplicitWorkloadCommand = (() => {
       if (isInterrogative) return false;
@@ -371,7 +389,7 @@ export class VoiceDispatcher {
 
     // 0A. WAKE / LISTEN DIRECTIVE ("NeuralFlow listen", "listen", "hey neuralflow")
     if (
-      !text || has('listen', 'wake up', 'hear me', 'can you hear', 'greeting', 'test mic')
+      !text || (has('listen', 'wake up', 'hear me', 'can you hear', 'greeting', 'test mic') && !isStopListening && !isConcise)
     ) {
       intent = 'wake' as any;
       spokenReply = `NeuralFlow is listening live. You can say "Start simulation", "Increase workload", "Increase fan speed", "Increase users", or "Suggest".`;
@@ -406,7 +424,7 @@ export class VoiceDispatcher {
       } else if (currentJunction > 72 || predictedTemp > 75) {
         spokenReply = `Suggestion: High thermal load detected at ${currentJunction.toFixed(1)}°C. Say "Increase fan speed" or "Pre-ramp cooling fans" to proactively spin fans to 80% and prevent throttling.`;
         actionTaken = 'Suggested pre-ramping cooling fans due to rising temperatures';
-      } else if (engine.ai_reqs < 1000) {
+      } else if (engine.ai_reqs < 80) {
         spokenReply = `Suggestion: AI load is low (${engine.ai_reqs} req/s). Say "Increase workload" to stress test the cluster under burst traffic.`;
         actionTaken = 'Suggested increasing AI workload to stress test cooling loop';
       } else {
@@ -429,8 +447,9 @@ export class VoiceDispatcher {
     }
     // 2. START / RUN / PLAY / BEGIN SIMULATION
     else if (
+      !isQuestionForm &&
       has('start', 'begin', 'play', 'resume', 'turn on', 'go', 'simulate', 'run it', 'launch', 'spin up', 'fire up', 'start it', 'start simulation', 'play simulation', 'run cluster') &&
-      !has('runbook', 'start over')
+      !has('runbook', 'start over', 'fan', 'fans', 'cooling')
     ) {
       intent = 'start_sim';
       engine.running = true;
@@ -439,6 +458,7 @@ export class VoiceDispatcher {
     }
     // 3. RESET / RESTART SIMULATION
     else if (
+      !isQuestionForm &&
       has('reset', 'restart', 'start over', 'clear', 're set', 'reboot', 're initialize', 'defaults', 'restore')
     ) {
       intent = 'reset_sim';
@@ -448,6 +468,7 @@ export class VoiceDispatcher {
     }
     // 4. PAUSE / STOP SIMULATION
     else if (
+      !isQuestionForm &&
       has('pause', 'stop', 'freeze', 'halt', 'turn off', 'hold', 'break') &&
       !has('stop listening')
     ) {
@@ -464,7 +485,7 @@ export class VoiceDispatcher {
       )
     ) {
       intent = 'preramp';
-      engine.nf_fan = Math.min(100.0, Math.max(70.0, (engine.nf_fan || 30.0) + 25.0));
+      engine.setFanOverride(Math.min(100.0, Math.max(70.0, (engine.nf_fan || 30.0) + 25.0)));
       engine.running = true;
       spokenReply = `Fan speed boosted to ${engine.nf_fan.toFixed(0)} percent! High-velocity airflow is now cooling down all 9 GPU sockets.`;
       actionTaken = `Increased NeuralFlow fan duty cycle to ${engine.nf_fan.toFixed(0)}%`;
@@ -477,7 +498,7 @@ export class VoiceDispatcher {
       )
     ) {
       intent = 'preramp';
-      engine.nf_fan = Math.max(20.0, (engine.nf_fan || 30.0) - 20.0);
+      engine.setFanOverride(Math.max(20.0, (engine.nf_fan || 30.0) - 20.0));
       spokenReply = `Fan speed lowered down to ${engine.nf_fan.toFixed(0)} percent to reduce acoustic noise and power consumption.`;
       actionTaken = `Decreased NeuralFlow fan duty cycle to ${engine.nf_fan.toFixed(0)}%`;
     }
@@ -489,7 +510,7 @@ export class VoiceDispatcher {
       )
     ) {
       intent = 'workload_burst';
-      engine.users = Math.min(200, (engine.users || 20) + 40);
+      engine.users = Math.min(200, (engine.users ?? 20) + 40);
       engine.running = true;
       spokenReply = `Active user traffic increased to ${engine.users} users (limit: 200). API query volume is scaling up proportionally.`;
       actionTaken = `Increased active users to ${engine.users}/200 users`;
@@ -502,7 +523,7 @@ export class VoiceDispatcher {
       )
     ) {
       intent = 'decrease_workload';
-      engine.users = Math.max(0, (engine.users || 20) - 30);
+      engine.users = Math.max(0, (engine.users ?? 20) - 30);
       spokenReply = `Active users reduced to ${engine.users} users.`;
       actionTaken = `Decreased active users to ${engine.users}/200`;
     }
@@ -514,7 +535,7 @@ export class VoiceDispatcher {
       )
     ) {
       intent = 'workload_burst';
-      engine.api_reqs = Math.min(500, (engine.api_reqs || 50) + 100);
+      engine.api_reqs = Math.min(500, (engine.api_reqs ?? 50) + 100);
       engine.running = true;
       spokenReply = `API request rate increased to ${engine.api_reqs} req/s (limit: 500 req/s).`;
       actionTaken = `Increased API requests to ${engine.api_reqs}/500 req/s`;
@@ -524,7 +545,7 @@ export class VoiceDispatcher {
       !isInterrogative && (has('decrease', 'lower', 'reduce', 'drop', 'less') && has('api', 'endpoint', 'rest', 'http'))
     ) {
       intent = 'decrease_workload';
-      engine.api_reqs = Math.max(0, Math.max(0, (engine.api_reqs || 50) - 100));
+      engine.api_reqs = Math.max(0, (engine.api_reqs ?? 50) - 100);
       spokenReply = `API request rate reduced to ${engine.api_reqs} requests per second.`;
       actionTaken = `Decreased API requests to ${engine.api_reqs}/500 req/s`;
     }
@@ -536,7 +557,7 @@ export class VoiceDispatcher {
       )
     ) {
       intent = 'workload_burst';
-      engine.batch = Math.min(5, (engine.batch || 0) + 1);
+      engine.batch = Math.min(5, (engine.batch ?? 0) + 1);
       engine.running = true;
       spokenReply = `Batch training scaled to ${engine.batch} heavy jobs (limit: 5 jobs). GPU power draw increased by ~${engine.batch * 100}W.`;
       actionTaken = `Scaled batch training to ${engine.batch}/5 active jobs`;
@@ -572,30 +593,30 @@ export class VoiceDispatcher {
       !isInterrogative && has('decrease', 'lower', 'reduce', 'less workload', 'less traffic', 'light', 'drop workload', 'ease load', 'slow down', 'scale down')
     ) {
       intent = 'decrease_workload';
-      engine.ai_reqs = Math.max(0, Math.round((engine.ai_reqs || 50) / 2));
-      engine.api_reqs = Math.max(0, Math.round((engine.api_reqs || 250) / 2));
-      engine.users = Math.max(0, Math.round((engine.users || 100) / 2));
-      engine.batch = Math.max(0, Math.max(0, (engine.batch || 2) - 1));
+      engine.ai_reqs = Math.max(0, Math.round((engine.ai_reqs ?? 0) / 2));
+      engine.api_reqs = Math.max(0, Math.round((engine.api_reqs ?? 0) / 2));
+      engine.users = Math.max(0, Math.round((engine.users ?? 0) / 2));
+      engine.batch = Math.max(0, (engine.batch ?? 0) - 1);
       spokenReply = `Workload reduced to ${engine.ai_reqs} AI req/s, ${engine.api_reqs} API req/s, ${engine.users} users, and ${engine.batch} batch jobs. Thermal dissipation in progress.`;
       actionTaken = `Reduced workload: AI ${engine.ai_reqs} req/s, API ${engine.api_reqs} req/s, Users ${engine.users}, Batch ${engine.batch}`;
     }
     // 7. PRE-RAMP COOLING FANS / COOL DOWN
     else if (
-      has('ramp', 'cool', 'fan', 'pre ramp', 'preramp', 'cooling', 'chill', 'cold air', 'spin fans', 'fans up', 'turn on fan', 'boost fan')
+      has('ramp', 'cool', 'fan', 'pre ramp', 'preramp', 'cooling', 'chill', 'cold air', 'spin fans', 'fans up', 'turn on fan', 'boost fan') &&
+      !has('emergency', 'max fan', 'maximum cooling', 'full fan', 'full cooling', '100%', 'max cooling')
     ) {
       intent = 'preramp';
-      engine.ai_reqs = Math.max(1600, engine.ai_reqs);
-      engine.nf_fan = 80.0;
+      engine.setFanOverride(Math.max(80.0, engine.nf_fan || 0));
       engine.running = true;
-      spokenReply = `Cooling fans pre-ramped to 80 percent! NeuralFlow is pushing cold air ahead of time to keep temperatures well below the 85-degree danger limit.`;
-      actionTaken = 'Activated RB-01: Proactively boosted cooling fans to 80% & engaged PINN simulation';
+      spokenReply = `Cooling fans pre-ramped to ${engine.nf_fan.toFixed(0)} percent! NeuralFlow is pushing cold air ahead of time to keep temperatures well below the 85-degree danger limit.`;
+      actionTaken = `Activated RB-01: Proactively boosted cooling fans to ${engine.nf_fan.toFixed(0)}% & engaged PINN simulation`;
     } 
     // 8. DIAGNOSE / STATUS / TEMPERATURE
     else if (
       has('diagnos', 'status', 'temperature', 'how hot', 'temp', 'check', 'health', 'telemetry', 'report', 'condition', 'readings')
     ) {
       intent = 'diagnose';
-      spokenReply = `Cluster status: Primary GPU junction is at ${currentJunction.toFixed(1)}°C with fan speed at ${currentFan.toFixed(0)}%. PINN forecast projects ${predictedTemp.toFixed(1)}°C in the 60-second horizon. Safe operating margin is maintained. Next, try saying "Increase workload" to test thermal limits.`;
+      spokenReply = `Cluster status: Primary GPU junction is at ${currentJunction.toFixed(1)}°C with fan speed at ${currentFan.toFixed(0)}%. PINN forecast projects ${predictedTemp.toFixed(1)}°C in the 60-second horizon. ${predictedTemp >= 85 ? 'Throttle risk: the forecast crosses the 85°C limit, say "Emergency cooling" now.' : predictedTemp >= 78 ? 'Margin is shrinking, consider "Pre-ramp cooling fans".' : 'Safe operating margin is maintained.'} Next, try saying "Increase workload" to test thermal limits.`;
       actionTaken = 'Analyzed cluster temperatures and 60s PINN forecast horizon';
     } 
     // 9. REBALANCE
@@ -617,7 +638,7 @@ export class VoiceDispatcher {
     // 11. EMERGENCY MAXIMUM COOLING
     else if (has('emergency', 'guardrail', 'trip', 'safety', '100%', 'max fan', 'maximum cooling', 'full fan', 'full cooling')) {
       intent = 'emergency';
-      engine.nf_fan = 100.0;
+      engine.setFanOverride(100.0);
       engine.running = true;
       spokenReply = `Emergency cooling activated! Fans forced to 100 percent maximum duty cycle under RB-04. Junction temperature ceiling secured.`;
       actionTaken = 'Forced emergency 100% fan duty cycle & engaged RB-04 thermal clamp';
@@ -625,7 +646,8 @@ export class VoiceDispatcher {
     // 12. PID vs NEURALFLOW COMPARISON
     else if (has('pid', 'switch', 'compare', 'comparison', 'versus', 'vs', 'benchmark')) {
       intent = 'switch_mode';
-      spokenReply = `Comparison confirmed: NeuralFlow PINN outperforms reactive PID by saving 12.8% cooling energy, reducing peak junction temperature from 84°C to 71°C, and generating zero throttle events.`;
+      const b = SimulationEngine.runBatch('mixed', 600);
+      spokenReply = `Fresh 600-second mixed-workload benchmark: NeuralFlow peaked at ${b.neuralflow.peak_temp}°C versus ${b.pid.peak_temp}°C for reactive PID, with ${b.neuralflow.throttle_events} throttle seconds versus ${b.pid.throttle_events}. Cooling energy was ${b.neuralflow.cooling_energy_wh} Wh versus ${b.pid.cooling_energy_wh} Wh.`;
       actionTaken = 'Benchmarked PINN proactive feed-forward against reactive PID';
     }
     // 13. RUNBOOK / INCIDENT QUERY

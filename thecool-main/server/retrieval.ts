@@ -120,7 +120,8 @@ export class Retriever {
 
   status(): RetrieverStatus & { forcedBackend: 'auto' | 'moss' | 'local' } {
     const naturalBackend: 'moss' | 'local' = this.state === 'ready' || this.state === 'cloud' ? 'moss' : 'local';
-    const activeBackend = this.forcedBackend !== 'auto' ? this.forcedBackend : naturalBackend;
+    // Report the backend that will actually serve queries: forcing 'moss' while Moss is down still serves locally.
+    const activeBackend: 'moss' | 'local' = this.forcedBackend === 'local' ? 'local' : naturalBackend;
     // When forced to moss but not ready, mode stays as natural until ready; forced local always shows local
     const effectiveMode = this.forcedBackend === 'local' ? 'local' : this.forcedBackend === 'moss' && naturalBackend === 'local' ? 'local' : this.mode();
     return {
@@ -278,7 +279,7 @@ export class Retriever {
     let lastErr: any;
     for (let i = 0; i <= delays.length; i++) {
       try {
-        return await this.client.query(this.indexName, text, { topK, alpha: this.alpha });
+        return await this.client.query(this.indexName, text, { topK, alpha: this.effectiveAlpha() });
       } catch (err: any) {
         lastErr = err;
         if (i < delays.length) await new Promise((r) => setTimeout(r, delays[i]));
@@ -332,7 +333,7 @@ export class Retriever {
       const t0 = process.hrtime.bigint();
       try {
         let embedMs: number | undefined;
-        let queryOptions: any = { topK: limit, alpha: this.alpha };
+        let queryOptions: any = { topK: limit, alpha: this.effectiveAlpha() };
         if (this.localEmbeddings && this.embedder) {
           const e0 = process.hrtime.bigint();
           queryOptions = { ...queryOptions, embedding: await this.embedder.embed(query) };

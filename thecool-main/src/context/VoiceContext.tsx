@@ -262,6 +262,7 @@ export const VoiceProvider: React.FC<{
       gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
       osc.connect(gain);
       gain.connect(ctx.destination);
+      osc.onended = () => { ctx.close().catch(() => {}); };
       osc.start();
       osc.stop(ctx.currentTime + 0.12);
     } catch {}
@@ -1277,16 +1278,16 @@ export const VoiceProvider: React.FC<{
       let intent = 'general';
 
       const lower = clean.toLowerCase();
-      if (lower.includes('start') || lower.includes('play') || lower.includes('begin') || (lower.includes('run') && !lower.includes('runbook'))) {
-        onSendControl('play');
-        fallbackText = 'Simulation started! The GPU cluster is now running live. You can watch real-time temperatures update.';
-        fallbackAction = 'Started live GPU simulation';
-        intent = 'start_sim';
-      } else if (lower.includes('reset') || lower.includes('restart') || lower.includes('start over')) {
+      if (lower.includes('reset') || lower.includes('restart') || lower.includes('start over')) {
         onSendControl('reset');
         fallbackText = 'Simulation reset! Temperatures are restored to 40°C and fans to 30%.';
         fallbackAction = 'Reset cluster to baseline (40°C, 30% fan)';
         intent = 'reset_sim';
+      } else if (/\b(start|play|begin|resume)\b/.test(lower) || (/\brun\b/.test(lower) && !lower.includes('runbook'))) {
+        onSendControl('play');
+        fallbackText = 'Simulation started! The GPU cluster is now running live. You can watch real-time temperatures update.';
+        fallbackAction = 'Started live GPU simulation';
+        intent = 'start_sim';
       } else if (lower.includes('pause') || lower.includes('stop') || lower.includes('freeze')) {
         onSendControl('pause');
         fallbackText = 'Simulation paused. Cluster state is held.';
@@ -1298,14 +1299,14 @@ export const VoiceProvider: React.FC<{
         fallbackAction = 'Adjusted fan speed & cooling loop';
         intent = 'preramp';
       } else if (lower.includes('increase') || lower.includes('boost') || lower.includes('more')) {
-        const nextAi = Math.min(3600, Math.max(1800, (liveState?.ai_reqs || 10) + 600));
+        const nextAi = Math.min(100, (liveState?.ai_reqs ?? 10) + 30);
         onSendControl('params', { ai_reqs: nextAi });
         onSendControl('play');
         fallbackText = `Workload increased across the cluster to test thermal limits.`;
         fallbackAction = `Increased cluster workload`;
         intent = 'workload_burst';
       } else if (lower.includes('decrease') || lower.includes('lower') || lower.includes('reduce') || lower.includes('less')) {
-        const lowerAi = Math.max(50, Math.round((liveState?.ai_reqs || 1200) / 2));
+        const lowerAi = Math.max(0, Math.round((liveState?.ai_reqs ?? 0) / 2));
         onSendControl('params', { ai_reqs: lowerAi });
         fallbackText = `Workload reduced down to ${lowerAi} req/s. GPUs will cool down.`;
         fallbackAction = `Reduced AI workload to ${lowerAi} req/s`;
@@ -1321,11 +1322,11 @@ export const VoiceProvider: React.FC<{
         sender: 'agent',
         text: fallbackText,
         timestamp: new Date().toLocaleTimeString(),
-        mossLatency: 1.2,
-        mossBackend: 'local',
+        mossLatency: undefined,
+        mossBackend: undefined,
         answeredBy: 'rules',
-        actionTaken: fallbackAction,
-        retrievedDocs: ['HW-H100-SXM5', 'RB-01-BURST'],
+        actionTaken: `${fallbackAction} (offline fallback: server unreachable)`,
+        retrievedDocs: [],
         simulationImpact: {
           prevTemp: liveState?.nf_T || 40.0,
           predictedTemp: (liveState?.nf_T || 40.0) + 1.8,
@@ -1334,6 +1335,7 @@ export const VoiceProvider: React.FC<{
         },
         contextSources: { liveState: true, liveHistory: false, moss: false },
       };
+      const offlineRoundTripMs = Math.round((performance.now() - tSent) * 10) / 10;
 
       setMessages(prev => [...prev, fallbackMsg]);
       setLastSpokenReply(fallbackText);
@@ -1345,22 +1347,22 @@ export const VoiceProvider: React.FC<{
       const localRetrieval = {
         query: clean,
         results: [],
-        latencyMs: 1.2,
-        latencyMicroseconds: 1200,
-        wallClockMs: 1.2,
+        latencyMs: 0,
+        latencyMicroseconds: 0,
+        wallClockMs: 0,
         backend: 'local' as const,
         mode: 'local' as const,
-        retrievalEngine: 'Local keyword index (fallback, not Moss)',
-        sub10msGuaranteed: true,
-        totalDocsIndexed: 24,
+        retrievalEngine: 'None (server unreachable, no retrieval performed)',
+        sub10msGuaranteed: false,
+        totalDocsIndexed: 0,
         timestamp: new Date().toISOString()
       };
       setLastRetrieval(localRetrieval);
       setLastTimings({
-        retrievalMs: 1.2,
+        retrievalMs: 0,
         serverMs: 0,
         llmMs: undefined,
-        roundTripMs: 1.2
+        roundTripMs: offlineRoundTripMs
       });
       setLastVoiceDirective({
         text: clean,
@@ -1440,8 +1442,7 @@ export const VoiceProvider: React.FC<{
       threshold: '85.0°C limit',
       timestamp: nowTime,
       actionText: '❄️ Emergency 100% Fan Clamp',
-      actionCmd: 'params',
-      actionParams: { ai_reqs: 600 }
+      actionCmd: 'voice:Emergency maximum cooling'
     });
   }
 
@@ -1457,8 +1458,7 @@ export const VoiceProvider: React.FC<{
       threshold: '72.0°C warn',
       timestamp: nowTime,
       actionText: '❄️ Pre-Ramp Fans to 80%',
-      actionCmd: 'params',
-      actionParams: { ai_reqs: Math.max(1200, liveState?.ai_reqs || 1200) }
+      actionCmd: 'voice:Pre-ramp cooling fans'
     });
   }
 
@@ -1479,7 +1479,7 @@ export const VoiceProvider: React.FC<{
   }
 
   // 4. Extreme Workload Surge Warning
-  if (liveState && liveState.ai_reqs >= 2400 && !dismissedWarnings.has('workload-surge')) {
+  if (liveState && liveState.ai_reqs >= 90 && !dismissedWarnings.has('workload-surge')) {
     activeWarnings.push({
       id: 'workload-surge',
       level: 'info',
@@ -1487,11 +1487,11 @@ export const VoiceProvider: React.FC<{
       message: `AI request rate is at ${liveState.ai_reqs} req/s. High power draw (${liveState.power.toFixed(0)}W). Thermal inertia will continue rising.`,
       metric: 'AI Traffic',
       value: `${liveState.ai_reqs} req/s`,
-      threshold: '2400 req/s spike',
+      threshold: '90 req/s (max 100)',
       timestamp: nowTime,
-      actionText: '📉 Scale Down to 1200',
+      actionText: '📉 Scale Down to 50',
       actionCmd: 'params',
-      actionParams: { ai_reqs: 1200 }
+      actionParams: { ai_reqs: 50 }
     });
   }
 
@@ -1519,8 +1519,7 @@ export const VoiceProvider: React.FC<{
       value: '100%',
       timestamp: nowTime,
       actionText: 'Normal Cooling (80%)',
-      actionCmd: 'params',
-      actionParams: { ai_reqs: 1600 }
+      actionCmd: 'voice:Pre-ramp cooling fans'
     });
   }
 
@@ -1535,6 +1534,8 @@ export const VoiceProvider: React.FC<{
   const triggerMitigation = (cmd: string, params?: Partial<WorkloadParams>) => {
     if (cmd === 'simulate_start') {
       simulateVoice('Start simulation');
+    } else if (cmd.startsWith('voice:')) {
+      dispatchVoice(cmd.slice('voice:'.length));
     } else {
       onSendControl(cmd, params);
       if (cmd === 'params' && params?.ai_reqs) {
