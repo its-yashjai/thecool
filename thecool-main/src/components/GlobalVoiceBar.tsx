@@ -176,7 +176,7 @@ export const GlobalVoiceBar: React.FC = () => {
                   ) : isSpeaking ? (
                     <span className="text-sky-300">🔊 {lastSpokenReply}</span>
                   ) : (
-                    <span className="text-zinc-400">Speak naturally ("Start simulation", "Increase workload", "Reset")...</span>
+                    <span className="text-zinc-400">Say "Hey NeuralFlow" first, e.g. "Hey NeuralFlow, start simulation"...</span>
                   )}
                 </div>
               </div>
