@@ -153,7 +153,10 @@ async function startServer() {
     // Only call Moss/local retrieval when the query actually needs it
     const preview = voiceDispatcher.previewSources(transcript);
     let mossResult: any;
-    if (preview.moss) {
+    // Longer utterances always get retrieval: speech-to-text often garbles the question word
+    // ("was there a time..." -> "but there are time..."), and retrieval is only milliseconds.
+    const wordCount = transcript.trim().split(/\s+/).filter(Boolean).length;
+    if (preview.moss || wordCount >= 5) {
       mossResult = await retriever.search(transcript, 3);
     } else {
       // No retrieval needed — create a no-op result so provenance is honest and latency is 0

@@ -727,6 +727,18 @@ export class VoiceDispatcher {
       spokenReply = `Hello! I am NeuralFlow, your AI thermal co-pilot. You can say "Start simulation" to test the GPU cooling loop, or say "Suggest" to get a live recommendation. What would you like to do?`;
       actionTaken = 'Greeted user and offered starting directives';
     }
+    // 14B. KNOWLEDGE FALLBACK: a longer sentence that matched no command is treated as a question
+    // (covers misheard questions without a question word). Only when retrieval found something solid.
+    else if (
+      raw.split(/\s+/).filter(Boolean).length >= 5 &&
+      mossResult.results.length > 0 &&
+      !(mossResult.backend === 'local' && mossResult.results[0].score < 2)
+    ) {
+      intent = 'knowledge';
+      const topDoc = mossResult.results[0].document;
+      spokenReply = `${this.speakDoc(topDoc)} Retrieved via ${this.backendLabel(mossResult)} in ${mossResult.latencyMs} milliseconds.`;
+      actionTaken = `Answered from knowledge base: ${topDoc.id} via ${this.backendLabel(mossResult)} (${mossResult.latencyMs}ms)`;
+    }
     // 15. GENERAL STANDBY / FALLBACK
     else {
       intent = 'general';
