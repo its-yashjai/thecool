@@ -89,35 +89,8 @@ const shortForSpeech = (text: string): string => {
  * so common variants are accepted. Requiring the "hey" prefix means narration such as
  * "NeuralFlow ramped its fans early" is ignored.
  */
+const WAKE_RE = /^\s*(?:hey|hi|hay|hai|he|ok|okay)[\s,]+(?:neural|neuro|nural|new\s?ral|mural)[\s-]*(?:flow|flo|flows|floor|low)\b[\s,.:!?-]*/i;
 const WAKE_TIMEOUT_MS = 8000;
-const WAKE_PREFIX = /^\s*(?:hey|hi|hay|hai|hei|he|ok|okay)\b[\s,.!]*/i;
-// Speech-to-text doesn't know "NeuralFlow" and often hears a familiar name ("Neeraj", "Nirav", "Nero flow").
-const NAME_START = /^(neu|nue|neur|nur|nir|ner|nee|nea|nia|new|nu|niu|nyu|nero|nira|nora)/;
-const levenshtein = (a: string, b: string): number => {
-  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
-  for (let j = 1; j <= b.length; j++) d[0][j] = j;
-  for (let i = 1; i <= a.length; i++)
-    for (let j = 1; j <= b.length; j++)
-      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-  return d[a.length][b.length];
-};
-/** "Hey <something that sounds like NeuralFlow> <command>" → { command } (command may be empty). */
-const matchWake = (text: string): { command: string } | null => {
-  const m = text.match(WAKE_PREFIX);
-  if (!m) return null;
-  const words = text.slice(m[0].length).split(/\s+/).filter(Boolean);
-  if (!words.length) return null;
-  let best: { k: number; dist: number } | null = null;
-  for (let k = 1; k <= Math.min(3, words.length); k++) {
-    const name = words.slice(0, k).join('').toLowerCase().replace(/[^a-z]/g, '');
-    if (!name) continue;
-    const dist = levenshtein(name, 'neuralflow');
-    const ok = dist <= 4 || (NAME_START.test(name) && dist <= 8);
-    if (ok && (!best || dist < best.dist)) best = { k, dist };
-  }
-  if (!best) return null;
-  return { command: words.slice(best.k).join(' ').replace(/^[\s,.:!?-]+/, '').trim() };
-};
 
 const normCmd = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 const isSameCommand = (a: string, b: string) => {
@@ -347,10 +320,10 @@ export const VoiceProvider: React.FC<{
   const handleHeard = useCallback((heard: string) => {
     const text = (heard || '').trim();
     if (!text) return;
-    const wake = matchWake(text);
+    const m = text.match(WAKE_RE);
     let command = '';
-    if (wake) {
-      command = wake.command;
+    if (m) {
+      command = text.slice(m[0].length).trim();
       if (!command) {
         // "Hey NeuralFlow" alone: arm and wait for the command
         wakeArmedUntilRef.current = Date.now() + WAKE_TIMEOUT_MS;
