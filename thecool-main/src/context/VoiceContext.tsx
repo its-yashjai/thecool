@@ -70,6 +70,19 @@ interface VoiceContextType {
 const VoiceContext = createContext<VoiceContextType | null>(null);
 
 /** Same spoken command? Ignores case/punctuation ("Increase workload." == "increase workload") and prefixes. */
+/**
+ * Spoken replies stay short (first 2 sentences, max ~35 words) so a demo never waits on a long read-out.
+ * The full answer is always shown on screen in the message card.
+ */
+const shortForSpeech = (text: string): string => {
+  const clean = (text || '').replace(/\s+/g, ' ').trim();
+  const sentences = clean.split(/(?<=[.!?])\s+/).filter(Boolean);
+  let out = sentences.slice(0, 2).join(' ');
+  const words = out.split(' ');
+  if (words.length > 35) out = words.slice(0, 35).join(' ').replace(/[,;:]$/, '') + '.';
+  return out || clean;
+};
+
 const normCmd = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 const isSameCommand = (a: string, b: string) => {
   const x = normCmd(a), y = normCmd(b);
@@ -590,7 +603,7 @@ export const VoiceProvider: React.FC<{
 
       const utterances = chunks.map((chunk, i) => {
         const u = new SpeechSynthesisUtterance(chunk);
-        u.rate = 1.05;
+        u.rate = 1.15;
         u.pitch = 1.0;
         u.volume = 1.0;
         if (preferredVoice) u.voice = preferredVoice;
@@ -1295,7 +1308,7 @@ export const VoiceProvider: React.FC<{
         });
       }
 
-      speakText(data.spokenReply);
+      speakText(shortForSpeech(data.spokenReply));
     } catch (err) {
       console.error('Dispatch error fallback', err);
 
@@ -1397,7 +1410,7 @@ export const VoiceProvider: React.FC<{
         time: new Date().toLocaleTimeString(),
         intent
       });
-      speakText(fallbackText);
+      speakText(shortForSpeech(fallbackText));
     } finally {
       setIsProcessing(false);
       // Brief debounce buffer before allowing next voice dispatch
