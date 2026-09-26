@@ -83,15 +83,6 @@ const shortForSpeech = (text: string): string => {
   return out || clean;
 };
 
-/**
- * Wake word: only speech that starts with "Hey NeuralFlow" is treated as a command, so the presenter can
- * talk to the audience without NeuralFlow reacting. Speech-to-text often splits or mishears the name,
- * so common variants are accepted. Requiring the "hey" prefix means narration such as
- * "NeuralFlow ramped its fans early" is ignored.
- */
-const WAKE_RE = /^\s*(?:hey|hi|hay|hai|he|ok|okay)[\s,]+(?:neural|neuro|nural|new\s?ral|mural)[\s-]*(?:flow|flo|flows|floor|low)\b[\s,.:!?-]*/i;
-const WAKE_TIMEOUT_MS = 8000;
-
 const normCmd = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 const isSameCommand = (a: string, b: string) => {
   const x = normCmd(a), y = normCmd(b);
@@ -315,36 +306,6 @@ export const VoiceProvider: React.FC<{
     return () => clearInterval(interval);
   }, [isSpeaking]);
 
-  // ── Wake word gate ("Hey NeuralFlow") ─────────────────────────────────────
-  const wakeArmedUntilRef = useRef<number>(0);
-  const handleHeard = useCallback((heard: string) => {
-    const text = (heard || '').trim();
-    if (!text) return;
-    const m = text.match(WAKE_RE);
-    let command = '';
-    if (m) {
-      command = text.slice(m[0].length).trim();
-      if (!command) {
-        // "Hey NeuralFlow" alone: arm and wait for the command
-        wakeArmedUntilRef.current = Date.now() + WAKE_TIMEOUT_MS;
-        playDirectiveChime();
-        setInterimTranscript('Listening for your command…');
-        return;
-      }
-    } else if (Date.now() < wakeArmedUntilRef.current) {
-      command = text; // follow-up right after "Hey NeuralFlow"
-    } else {
-      // Not addressed to NeuralFlow (presenter talking to the room): ignore
-      setInterimTranscript('');
-      return;
-    }
-    wakeArmedUntilRef.current = 0;
-    if (Date.now() - lastDispatchTimeRef.current < 4000 && isSameCommand(command, lastDispatchedTextRef.current)) return;
-    setInterimTranscript('');
-    setTranscript(command);
-    dispatchVoiceRef.current(command);
-  }, [playDirectiveChime]);
-
   // Resilient Speech Recognition Engine — optimized for noisy environments
   const startRecognition = useCallback(() => {
     if (typeof window === 'undefined') return;
@@ -468,7 +429,7 @@ export const VoiceProvider: React.FC<{
             latestInterimRef.current = '';
             setInterimTranscript('');
             setTranscript(finalPart);
-            handleHeard(finalPart);
+            dispatchVoiceRef.current(finalPart);
           }
           return;
         }
@@ -490,7 +451,7 @@ export const VoiceProvider: React.FC<{
                 latestInterimRef.current = '';
                 setInterimTranscript('');
                 setTranscript(interimPart);
-                handleHeard(interimPart);
+                dispatchVoiceRef.current(interimPart);
               }
             }
           }, debounceMs);
@@ -845,7 +806,7 @@ export const VoiceProvider: React.FC<{
                       latestInterimRef.current = '';
                       setInterimTranscript('');
                       setTranscript(currentInterim);
-                      handleHeard(currentInterim);
+                      dispatchVoiceRef.current(currentInterim);
                     }
                   }
                 }
